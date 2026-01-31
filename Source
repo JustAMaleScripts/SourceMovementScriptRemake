@@ -1,0 +1,1872 @@
+--[[
+	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
+]]
+-- Source Engine Movement for Roblox
+-- Improved UI + Hard Mode Grenade Cooldown + Grenade Collection & Throwing + Events
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+
+local player = Players.LocalPlayer
+local gui = player:WaitForChild("PlayerGui")
+
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local root = character:WaitForChild("HumanoidRootPart")
+
+local scriptEnabled = true
+local spaceHeld = false
+
+local velocity = Vector3.new()
+local isGrounded = false
+local wasGrounded = false
+local moveDir = Vector3.new()
+
+local footstepTimer = 0
+local footstepInterval = 0.35
+local lastFootstepIndex = 0
+
+-- Grenade System
+local lastGrenadeTime = 0
+local grenadeAmmo = 0
+
+-- Collection System
+local collectedGrenades = 0
+local totalScore = 0
+local spawnedCollectibles = {}
+local lastSpawnTime = 0
+local collectionFolder = nil
+
+-- Event System
+local currentEvent = nil
+local eventEndTime = 0
+local lastEventCheck = 0
+local eventCheckInterval = 30 -- Check for new event every 30 seconds
+local gravityModifier = 0
+local spawnChanceBonus = 0
+local spawnIntervalOverride = nil
+local eventLabel = nil
+local eventTimerLabel = nil
+local rainingBombsActive = false
+
+-- Events Configuration
+local EVENTS = {
+    {
+        name = "Raining Bombs",
+        icon = "💥",
+        color = Color3.fromRGB(255, 50, 50),
+        duration = 15,
+        chance = 0.20,
+        description = "Bombs fall from sky! Dodge or collect!"
+    },
+    {
+        name = "Moon Gravity",
+        icon = "🌙",
+        color = Color3.fromRGB(150, 150, 255),
+        duration = 20,
+        chance = 0.25,
+        description = "Gravity reduced by 10!"
+    },
+    {
+        name = "Lucky Day",
+        icon = "🍀",
+        color = Color3.fromRGB(100, 255, 100),
+        duration = 25,
+        chance = 0.22,
+        description = "+20% spawn chance, 6.35s interval!"
+    },
+}
+
+-- Grenade Types Configuration
+local GRENADE_TYPES = {
+    {name = "Frag", color = Color3.fromRGB(85, 107, 47), points = 10, material = Enum.Material.Metal},
+    {name = "Smoke", color = Color3.fromRGB(169, 169, 169), points = 15, material = Enum.Material.SmoothPlastic},
+    {name = "Flashbang", color = Color3.fromRGB(255, 255, 200), points = 20, material = Enum.Material.Neon},
+    {name = "Incendiary", color = Color3.fromRGB(255, 69, 0), points = 25, material = Enum.Material.Neon},
+    {name = "EMP", color = Color3.fromRGB(0, 191, 255), points = 30, material = Enum.Material.Neon},
+    {name = "Concussion", color = Color3.fromRGB(255, 215, 0), points = 12, material = Enum.Material.Metal},
+    {name = "Sticky", color = Color3.fromRGB(138, 43, 226), points = 18, material = Enum.Material.SmoothPlastic},
+    {name = "Cluster", color = Color3.fromRGB(178, 34, 34), points = 35, material = Enum.Material.Metal},
+    {name = "Cryo", color = Color3.fromRGB(173, 216, 230), points = 22, material = Enum.Material.Ice},
+    {name = "Plasma", color = Color3.fromRGB(0, 255, 127), points = 40, material = Enum.Material.Neon},
+}
+
+-- config
+local cfg = {
+    groundAccel = 50,
+    airAccel = 2100,
+    maxAirSpeed = 13,
+    runSpeed = 26.5,
+    jumpPower = 26,
+    gravity = 80,
+    friction = 4,
+    stopSpeed = 5,
+}
+
+local rocketBlastRadius = 25
+local bombBlastRadius = 15
+
+local footstepSounds = {
+    Slate = {
+        "rbxassetid://81623756670923",
+        "rbxassetid://78754179999047",
+        "rbxassetid://79418255155423",
+        "rbxassetid://112240321395589",
+    },
+    Grass = {
+        "rbxassetid://105277634319381",
+        "rbxassetid://98069158661569",
+        "rbxassetid://135182192451997",
+        "rbxassetid://116425333836106",
+    },
+    Wood = {
+        "rbxassetid://87921439933530",
+        "rbxassetid://89597871459985",
+        "rbxassetid://139932856876296",
+        "rbxassetid://75643573822739",
+    },
+    WoodPlanks = {
+        "rbxassetid://87921439933530",
+        "rbxassetid://89597871459985",
+        "rbxassetid://139932856876296",
+        "rbxassetid://75643573822739",
+    },
+    Metal = {
+        "rbxassetid://78580994772675",
+        "rbxassetid://79005288283137",
+        "rbxassetid://98060045106272",
+        "rbxassetid://122668036980895",
+    },
+    Sand = {
+        "rbxassetid://84209465430801",
+        "rbxassetid://115151668857364",
+        "rbxassetid://93919782627384",
+        "rbxassetid://105793766638092",
+    },
+    Plastic = {
+        "rbxassetid://135712042029119",
+        "rbxassetid://90507702118699",
+        "rbxassetid://98172042741214",
+        "rbxassetid://106319783012941",
+    },
+    SmoothPlastic = {
+        "rbxassetid://135712042029119",
+        "rbxassetid://90507702118699",
+        "rbxassetid://98172042741214",
+        "rbxassetid://106319783012941",
+    },
+    Air = {
+        "",
+    },
+}
+
+local function getFloorMaterial()
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {character}
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local result = workspace:Raycast(root.Position, Vector3.new(0, -3.8, 0), rayParams)
+    
+    if result and result.Instance then
+        local floorMaterial = result.Instance.Material.Name
+        
+        if footstepSounds[floorMaterial] then
+            return floorMaterial
+        else
+            return "Slate"
+        end
+    end
+    
+    return "Slate"
+end
+
+local function playFootstep()
+    local material = getFloorMaterial()
+    local soundTable = footstepSounds[material]
+    local sound = Instance.new("Sound", workspace)
+    
+    lastFootstepIndex = lastFootstepIndex + 1
+    if lastFootstepIndex > #soundTable then
+        lastFootstepIndex = 1
+    end
+    
+    sound.SoundId = soundTable[lastFootstepIndex]
+    sound.Volume = 0.6
+    sound.PlaybackSpeed = 1.0 + math.random(-10, 10) / 100
+    sound:Play()
+    
+    Debris:AddItem(sound, 2)
+end
+
+local function playJump()
+    local material = getFloorMaterial()
+    local soundTable = footstepSounds[material]
+    
+    if #soundTable > 0 and soundTable[1] ~= "" then
+        local sound = Instance.new("Sound", workspace)
+        local randomIndex = math.random(1, #soundTable)
+        sound.SoundId = soundTable[randomIndex]
+        sound.Volume = 1
+        sound.PlaybackSpeed = 1.0 + math.random(-5, 5) / 100
+        sound:Play()
+        Debris:AddItem(sound, 2)
+    end
+end
+
+local function playLand()
+    local material = getFloorMaterial()
+    local soundTable = footstepSounds[material]
+    
+    if #soundTable > 0 and soundTable[1] ~= "" then
+        local sound = Instance.new("Sound", workspace)
+        local randomIndex = math.random(1, #soundTable)
+        sound.SoundId = soundTable[randomIndex]
+        sound.Volume = 1.0
+        sound.PlaybackSpeed = 1.0 + math.random(-5, 5) / 100
+        sound:Play()
+        Debris:AddItem(sound, 2)
+    end
+end
+
+local function playCollectSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://9114374535"
+    sound.Volume = 0.8
+    sound.PlaybackSpeed = 1.0 + math.random(-5, 5) / 100
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playNoAmmoSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://138090596"
+    sound.Volume = 0.5
+    sound.PlaybackSpeed = 1.0
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playEventSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://5153734236" -- Alert/event sound
+    sound.Volume = 1.0
+    sound.PlaybackSpeed = 1.0
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playBombWarningSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://5153734236" -- Warning sound
+    sound.Volume = 0.8
+    sound.PlaybackSpeed = 1.5
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- Game Modes Configuration
+local gameModes = {
+    {
+        name = "Default", 
+        color = Color3.fromRGB(80, 200, 120), 
+        icon = "🎮",
+        unlimitedGrenades = true,
+        collectionMode = false,
+        spawnInterval = 0,
+        spawnChance = 0,
+        grenadeCooldown = 0,
+        description = "Unlimited grenades"
+    },
+    {
+        name = "Scavenger", 
+        color = Color3.fromRGB(255, 180, 60), 
+        icon = "🔍",
+        unlimitedGrenades = false,
+        collectionMode = true,
+        spawnInterval = 10,
+        spawnChance = 0.70,
+        grenadeCooldown = 0,
+        description = "Collect grenades to throw! 10s, 70%"
+    },
+    {
+        name = "Hard", 
+        color = Color3.fromRGB(255, 80, 80), 
+        icon = "💀",
+        unlimitedGrenades = true,
+        collectionMode = false,
+        spawnInterval = 0,
+        spawnChance = 0,
+        grenadeCooldown = 3,
+        description = "Unlimited grenades, 3s cooldown"
+    },
+    {
+        name = "Hard Scavenger", 
+        color = Color3.fromRGB(180, 50, 180), 
+        icon = "🔥",
+        unlimitedGrenades = false,
+        collectionMode = true,
+        spawnInterval = 15,
+        spawnChance = 0.375,
+        grenadeCooldown = 1,
+        description = "Collect to throw! 15s, 35-40%, 1s CD"
+    }
+}
+
+local currentModeIndex = 1
+
+-- Mode Helper Functions
+local function getCurrentMode()
+    return gameModes[currentModeIndex]
+end
+
+local function isHardMode()
+    local mode = getCurrentMode()
+    return mode.name == "Hard" or mode.name == "Hard Scavenger"
+end
+
+local function hasUnlimitedGrenades()
+    return getCurrentMode().unlimitedGrenades
+end
+
+local function isCollectionMode()
+    return getCurrentMode().collectionMode
+end
+
+local function getSpawnChance()
+    local mode = getCurrentMode()
+    local baseChance = mode.spawnChance
+    if mode.name == "Hard Scavenger" then
+        baseChance = 0.35 + math.random() * 0.05
+    end
+    return math.min(baseChance + spawnChanceBonus, 1.0) -- Cap at 100%
+end
+
+local function getSpawnInterval()
+    if spawnIntervalOverride then
+        return spawnIntervalOverride
+    end
+    return getCurrentMode().spawnInterval
+end
+
+local function getEffectiveGravity()
+    return cfg.gravity - gravityModifier
+end
+
+-- Event System Functions
+local function showEventNotification(event, isEnding)
+    local g = gui:FindFirstChild("SourceDBG")
+    if not g then return end
+    
+    -- Create notification
+    local notif = Instance.new("Frame", g)
+    notif.Size = UDim2.new(0, 300, 0, 60)
+    notif.Position = UDim2.new(0.5, -150, 0, -70)
+    notif.BackgroundColor3 = event.color
+    notif.BorderSizePixel = 0
+    notif.Name = "EventNotification"
+    
+    local notifCorner = Instance.new("UICorner", notif)
+    notifCorner.CornerRadius = UDim.new(0, 10)
+    
+    local notifStroke = Instance.new("UIStroke", notif)
+    notifStroke.Color = Color3.new(1, 1, 1)
+    notifStroke.Thickness = 2
+    notifStroke.Transparency = 0.5
+    
+    local icon = Instance.new("TextLabel", notif)
+    icon.Size = UDim2.new(0, 50, 1, 0)
+    icon.BackgroundTransparency = 1
+    icon.Text = event.icon
+    icon.TextSize = 30
+    icon.Font = Enum.Font.GothamBold
+    
+    local title = Instance.new("TextLabel", notif)
+    title.Size = UDim2.new(1, -60, 0, 25)
+    title.Position = UDim2.new(0, 55, 0, 5)
+    title.BackgroundTransparency = 1
+    title.Text = isEnding and "EVENT ENDED" or "EVENT STARTED"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.TextSize = 12
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local name = Instance.new("TextLabel", notif)
+    name.Size = UDim2.new(1, -60, 0, 25)
+    name.Position = UDim2.new(0, 55, 0, 28)
+    name.BackgroundTransparency = 1
+    name.Text = event.icon .. " " .. event.name
+    name.TextColor3 = Color3.new(1, 1, 1)
+    name.TextSize = 16
+    name.Font = Enum.Font.GothamBlack
+    name.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- Animate in
+    TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back), {
+        Position = UDim2.new(0.5, -150, 0, 20)
+    }):Play()
+    
+    -- Animate out after delay
+    task.delay(3, function()
+        TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+            Position = UDim2.new(0.5, -150, 0, -70)
+        }):Play()
+        task.delay(0.5, function()
+            notif:Destroy()
+        end)
+    end)
+end
+
+local function startEvent(eventData)
+    currentEvent = eventData
+    eventEndTime = tick() + eventData.duration
+    
+    playEventSound()
+    showEventNotification(eventData, false)
+    
+    print(string.format("🎉 EVENT STARTED: %s %s (%.0fs)", eventData.icon, eventData.name, eventData.duration))
+    
+    -- Apply event effects
+    if eventData.name == "Moon Gravity" then
+        gravityModifier = 10
+        print("🌙 Gravity reduced! Now at " .. getEffectiveGravity())
+        
+    elseif eventData.name == "Lucky Day" then
+        spawnChanceBonus = 0.20 -- +20%
+        spawnIntervalOverride = 6.35
+        print("🍀 Lucky Day! +20% spawn chance, 6.35s interval")
+        
+    elseif eventData.name == "Raining Bombs" then
+        rainingBombsActive = true
+        print("💥 Raining Bombs! Watch the sky!")
+    end
+end
+
+local function endEvent()
+    if not currentEvent then return end
+    
+    showEventNotification(currentEvent, true)
+    print(string.format("⏹️ EVENT ENDED: %s %s", currentEvent.icon, currentEvent.name))
+    
+    -- Remove event effects
+    if currentEvent.name == "Moon Gravity" then
+        gravityModifier = 0
+        
+    elseif currentEvent.name == "Lucky Day" then
+        spawnChanceBonus = 0
+        spawnIntervalOverride = nil
+        
+    elseif currentEvent.name == "Raining Bombs" then
+        rainingBombsActive = false
+    end
+    
+    currentEvent = nil
+    eventEndTime = 0
+end
+
+local function tryTriggerEvent()
+    if currentEvent then return end -- Already in an event
+    
+    local roll = math.random()
+    local cumulative = 0
+    
+    for _, event in ipairs(EVENTS) do
+        cumulative = cumulative + event.chance
+        if roll <= cumulative then
+            startEvent(event)
+            return
+        end
+    end
+end
+
+-- Raining Bombs Functions
+local function spawnFallingBomb()
+    if not rainingBombsActive then return end
+    if not scriptEnabled then return end
+    
+    -- Random position around player
+    local angle = math.random() * math.pi * 2
+    local distance = math.random(5, 30)
+    local offsetX = math.cos(angle) * distance
+    local offsetZ = math.sin(angle) * distance
+    
+    local targetPos = root.Position + Vector3.new(offsetX, 0, offsetZ)
+    local startPos = targetPos + Vector3.new(0, 80, 0)
+    
+    -- Check if this bomb might hit player (chance to dodge)
+    local distToPlayer = (Vector3.new(targetPos.X, 0, targetPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+    local willHitPlayer = distToPlayer < 8
+    local dodgeChance = math.random()
+    local playerDodged = dodgeChance > 0.6 -- 40% chance to "dodge" (bomb misses)
+    
+    -- Create bomb
+    local bomb = Instance.new("Part")
+    bomb.Name = "FallingBomb"
+    bomb.Size = Vector3.new(2, 3, 2)
+    bomb.Shape = Enum.PartType.Cylinder
+    bomb.Color = Color3.fromRGB(50, 50, 50)
+    bomb.Material = Enum.Material.Metal
+    bomb.Position = startPos
+    bomb.Orientation = Vector3.new(0, 0, 90)
+    bomb.Anchored = false
+    bomb.CanCollide = false
+    bomb.Parent = workspace
+    
+    -- Add fins
+    local fin = Instance.new("Part")
+    fin.Size = Vector3.new(1, 0.2, 2)
+    fin.Color = Color3.fromRGB(100, 0, 0)
+    fin.Material = Enum.Material.Metal
+    fin.Anchored = false
+    fin.CanCollide = false
+    fin.Parent = bomb
+    
+    local finWeld = Instance.new("WeldConstraint")
+    finWeld.Part0 = bomb
+    finWeld.Part1 = fin
+    finWeld.Parent = bomb
+    fin.Position = bomb.Position + Vector3.new(0, 1.5, 0)
+    
+    -- Warning indicator on ground
+    local warning = Instance.new("Part")
+    warning.Name = "BombWarning"
+    warning.Size = Vector3.new(bombBlastRadius * 2, 0.2, bombBlastRadius * 2)
+    warning.Shape = Enum.PartType.Cylinder
+    warning.Color = Color3.fromRGB(255, 0, 0)
+    warning.Material = Enum.Material.Neon
+    warning.Transparency = 0.7
+    warning.Anchored = true
+    warning.CanCollide = false
+    warning.Position = targetPos
+    warning.Orientation = Vector3.new(0, 0, 90)
+    warning.Parent = workspace
+    
+    playBombWarningSound()
+    
+    -- Blink warning
+    local blinkConnection
+    local blinkState = false
+    blinkConnection = RunService.Heartbeat:Connect(function()
+        if not warning or not warning.Parent then
+            blinkConnection:Disconnect()
+            return
+        end
+        blinkState = not blinkState
+        warning.Transparency = blinkState and 0.5 or 0.8
+    end)
+    
+    -- Apply velocity
+    bomb.AssemblyLinearVelocity = Vector3.new(0, -60, 0)
+    
+    local hasExploded = false
+    
+    -- Touch detection
+    local touchConnection
+    touchConnection = bomb.Touched:Connect(function(hit)
+        if hasExploded then return end
+        if hit and not hit:IsDescendantOf(character) and hit.CanCollide then
+            hasExploded = true
+            
+            local explosionPos = bomb.Position
+            
+            -- Check if player is in range
+            local dist = (root.Position - explosionPos).Magnitude
+            local playerInRange = dist <= bombBlastRadius
+            
+            -- Explode
+            local explodeSound = Instance.new("Sound", workspace)
+            explodeSound.SoundId = "rbxassetid://90586353104830"
+            explodeSound.Volume = 1.2
+            explodeSound:Play()
+            Debris:AddItem(explodeSound, 2)
+            
+            local explosion = Instance.new("Explosion")
+            explosion.Position = explosionPos
+            explosion.BlastPressure = 0
+            explosion.BlastRadius = bombBlastRadius
+            explosion.Parent = workspace
+            
+            -- If player is in range, push them
+            if playerInRange then
+                local dir = (root.Position - explosionPos).Unit
+                local forceMagnitude = 60
+                velocity = velocity + dir * forceMagnitude
+                
+                -- In scavenger mode, if they "survived" (dodged), give a grenade
+                if isCollectionMode() and playerDodged then
+                    grenadeAmmo = grenadeAmmo + 1
+                    totalScore = totalScore + 5
+                    
+                    -- Show reward notification
+                    local floatingText = Instance.new("Part")
+                    floatingText.Size = Vector3.new(0.1, 0.1, 0.1)
+                    floatingText.Transparency = 1
+                    floatingText.Anchored = true
+                    floatingText.CanCollide = false
+                    floatingText.Position = root.Position + Vector3.new(0, 3, 0)
+                    floatingText.Parent = workspace
+                    
+                    local textBillboard = Instance.new("BillboardGui")
+                    textBillboard.Size = UDim2.new(0, 100, 0, 30)
+                    textBillboard.AlwaysOnTop = true
+                    textBillboard.Parent = floatingText
+                    
+                    local floatLabel = Instance.new("TextLabel")
+                    floatLabel.Size = UDim2.new(1, 0, 1, 0)
+                    floatLabel.BackgroundTransparency = 1
+                    floatLabel.Text = "SURVIVED! +1💣"
+                    floatLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                    floatLabel.TextStrokeTransparency = 0
+                    floatLabel.TextScaled = true
+                    floatLabel.Font = Enum.Font.GothamBlack
+                    floatLabel.Parent = textBillboard
+                    
+                    playCollectSound()
+                    
+                    local startPos2 = floatingText.Position
+                    local startTime2 = tick()
+                    local floatConn
+                    floatConn = RunService.Heartbeat:Connect(function()
+                        local elapsed = tick() - startTime2
+                        if elapsed > 2 then
+                            floatingText:Destroy()
+                            floatConn:Disconnect()
+                            return
+                        end
+                        floatingText.Position = startPos2 + Vector3.new(0, elapsed * 2, 0)
+                        floatLabel.TextTransparency = elapsed / 2
+                        floatLabel.TextStrokeTransparency = elapsed / 2
+                    end)
+                    
+                    print("💥 Survived bomb! +1 grenade!")
+                end
+            end
+            
+            bomb:Destroy()
+            warning:Destroy()
+            blinkConnection:Disconnect()
+            touchConnection:Disconnect()
+        end
+    end)
+    
+    -- Timeout
+    Debris:AddItem(bomb, 5)
+    Debris:AddItem(warning, 5)
+end
+
+-- Check grenade availability
+local function canUseGrenade()
+    local mode = getCurrentMode()
+    
+    if not mode.unlimitedGrenades and grenadeAmmo <= 0 then
+        return false, 0, "NO_AMMO"
+    end
+    
+    if mode.grenadeCooldown > 0 then
+        local elapsed = tick() - lastGrenadeTime
+        if elapsed < mode.grenadeCooldown then
+            return false, mode.grenadeCooldown - elapsed, "COOLDOWN"
+        end
+    end
+    
+    return true, 0, "READY"
+end
+
+-- Throw grenade function
+local function throwGrenade()
+    if not scriptEnabled then return false end
+    
+    local canUse, remaining, reason = canUseGrenade()
+    if not canUse then
+        if reason == "NO_AMMO" then
+            playNoAmmoSound()
+        end
+        return false
+    end
+    
+    if not hasUnlimitedGrenades() then
+        grenadeAmmo = grenadeAmmo - 1
+    end
+    
+    lastGrenadeTime = tick()
+    
+    local cam = workspace.CurrentCamera
+    local direction = cam.CFrame.LookVector
+    local startPos = root.Position + direction * 3
+    
+    local rocket = Instance.new("Part")
+    rocket.Name = "Grenade"
+    rocket.Size = Vector3.new(0.5, 0.5, 2)
+    rocket.BrickColor = BrickColor.new("Really red")
+    rocket.Material = Enum.Material.Neon
+    rocket.Anchored = false
+    rocket.CanCollide = false
+    rocket.CFrame = CFrame.lookAt(startPos, startPos + direction)
+    rocket.Parent = workspace
+    
+    local attachment0 = Instance.new("Attachment", rocket)
+    attachment0.Position = Vector3.new(0, 0, -1)
+    local attachment1 = Instance.new("Attachment", rocket)
+    local trail = Instance.new("Trail", rocket)
+    trail.Attachment0 = attachment0
+    trail.Attachment1 = attachment1
+    trail.Color = ColorSequence.new(Color3.fromRGB(255, 165, 0))
+    trail.Transparency = NumberSequence.new{
+        NumberSequenceKeypoint.new(0, 0.3),
+        NumberSequenceKeypoint.new(1, 1)
+    }
+    trail.Lifetime = 0.3
+    trail.MinLength = 0
+    
+    rocket.AssemblyLinearVelocity = direction * 150
+    
+    local explodeSound = Instance.new("Sound")
+    explodeSound.SoundId = "rbxassetid://90586353104830"
+    explodeSound.Volume = 1.0
+    explodeSound.PlaybackSpeed = 1
+    
+    local shootSound = Instance.new("Sound", root)
+    shootSound.SoundId = "rbxassetid://2156366946"
+    shootSound.Volume = 1.0
+    shootSound.PlaybackSpeed = 1.0
+    shootSound:Play()
+    Debris:AddItem(shootSound, 2)
+    
+    local connection
+    connection = rocket.Touched:Connect(function(hit)
+        if hit and not hit:IsDescendantOf(character) then
+            local explosionPos = rocket.Position
+            
+            local dist = (root.Position - explosionPos).Magnitude
+            local shouldPush = dist <= rocketBlastRadius
+            
+            explodeSound.Parent = workspace
+            explodeSound:Play()
+            Debris:AddItem(explodeSound, 2)
+            
+            local explosion = Instance.new("Explosion")
+            explosion.Position = explosionPos
+            explosion.BlastPressure = 0
+            explosion.BlastRadius = rocketBlastRadius
+            explosion.Parent = workspace
+            
+            if shouldPush then
+                local dir = (root.Position - explosionPos).Unit
+                local forceMagnitude = 80
+                velocity = velocity + dir * forceMagnitude
+            end
+            
+            rocket:Destroy()
+            connection:Disconnect()
+        end
+    end)
+    
+    Debris:AddItem(rocket, 5)
+    return true
+end
+
+-- Collection System Functions
+local function createCollectionFolder()
+    if collectionFolder and collectionFolder.Parent then
+        collectionFolder:Destroy()
+    end
+    
+    collectionFolder = Instance.new("Folder")
+    collectionFolder.Name = "SourceMovement_Grenades"
+    collectionFolder.Parent = workspace
+    
+    return collectionFolder
+end
+
+local function findSpawnPosition()
+    local attempts = 0
+    local maxAttempts = 20
+    
+    while attempts < maxAttempts do
+        attempts = attempts + 1
+        
+        local angle = math.random() * math.pi * 2
+        local distance = math.random(15, 50)
+        local offsetX = math.cos(angle) * distance
+        local offsetZ = math.sin(angle) * distance
+        
+        local testPos = root.Position + Vector3.new(offsetX, 50, offsetZ)
+        
+        local rayParams = RaycastParams.new()
+        rayParams.FilterDescendantsInstances = {character, collectionFolder}
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        
+        local result = workspace:Raycast(testPos, Vector3.new(0, -100, 0), rayParams)
+        
+        if result and result.Instance and result.Instance.CanCollide then
+            return result.Position + Vector3.new(0, 2, 0)
+        end
+    end
+    
+    return root.Position + Vector3.new(math.random(-20, 20), 3, math.random(-20, 20))
+end
+
+local function spawnCollectible()
+    if not isCollectionMode() then return end
+    if not collectionFolder or not collectionFolder.Parent then
+        createCollectionFolder()
+    end
+    
+    local chance = getSpawnChance()
+    local roll = math.random()
+    
+    if roll > chance then
+        print(string.format("Spawn failed! Roll: %.2f, Needed: %.2f", roll, chance))
+        return false
+    end
+    
+    local grenadeData = GRENADE_TYPES[math.random(1, #GRENADE_TYPES)]
+    local spawnPos = findSpawnPosition()
+    
+    local collectible = Instance.new("Part")
+    collectible.Name = "Grenade_" .. grenadeData.name
+    collectible.Size = Vector3.new(1.5, 2, 1.5)
+    collectible.Shape = Enum.PartType.Cylinder
+    collectible.Color = grenadeData.color
+    collectible.Material = grenadeData.material
+    collectible.Anchored = true
+    collectible.CanCollide = false
+    collectible.Position = spawnPos
+    collectible.Orientation = Vector3.new(0, 0, 90)
+    collectible.Parent = collectionFolder
+    
+    local pointLight = Instance.new("PointLight")
+    pointLight.Color = grenadeData.color
+    pointLight.Brightness = 2
+    pointLight.Range = 8
+    pointLight.Parent = collectible
+    
+    local grenadeTop = Instance.new("Part")
+    grenadeTop.Size = Vector3.new(0.8, 0.8, 0.8)
+    grenadeTop.Shape = Enum.PartType.Ball
+    grenadeTop.Color = Color3.fromRGB(50, 50, 50)
+    grenadeTop.Material = Enum.Material.Metal
+    grenadeTop.Anchored = true
+    grenadeTop.CanCollide = false
+    grenadeTop.Parent = collectible
+    
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = collectible
+    weld.Part1 = grenadeTop
+    weld.Parent = collectible
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Size = UDim2.new(0, 120, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = collectible
+    
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, 0, 0.5, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = "💣 " .. grenadeData.name
+    nameLabel.TextColor3 = grenadeData.color
+    nameLabel.TextStrokeTransparency = 0
+    nameLabel.TextScaled = true
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.Parent = billboard
+    
+    local pointsLabel = Instance.new("TextLabel")
+    pointsLabel.Size = UDim2.new(1, 0, 0.5, 0)
+    pointsLabel.Position = UDim2.new(0, 0, 0.5, 0)
+    pointsLabel.BackgroundTransparency = 1
+    pointsLabel.Text = "+" .. grenadeData.points .. " pts | +1 💣"
+    pointsLabel.TextColor3 = Color3.fromRGB(255, 255, 100)
+    pointsLabel.TextStrokeTransparency = 0
+    pointsLabel.TextScaled = true
+    pointsLabel.Font = Enum.Font.GothamBold
+    pointsLabel.Parent = billboard
+    
+    collectible:SetAttribute("GrenadeName", grenadeData.name)
+    collectible:SetAttribute("Points", grenadeData.points)
+    collectible:SetAttribute("SpawnTime", tick())
+    
+    local originalY = spawnPos.Y
+    local animConnection
+    animConnection = RunService.Heartbeat:Connect(function(dt)
+        if not collectible or not collectible.Parent then
+            animConnection:Disconnect()
+            return
+        end
+        
+        local elapsed = tick() - collectible:GetAttribute("SpawnTime")
+        local newY = originalY + math.sin(elapsed * 2) * 0.5
+        collectible.Position = Vector3.new(collectible.Position.X, newY, collectible.Position.Z)
+        collectible.Orientation = Vector3.new(elapsed * 30, 0, 90)
+        
+        if grenadeTop and grenadeTop.Parent then
+            grenadeTop.Position = collectible.Position + Vector3.new(1.2, 0, 0)
+            grenadeTop.Anchored = true
+        end
+        
+        if elapsed > 30 then
+            collectible:Destroy()
+            animConnection:Disconnect()
+        end
+    end)
+    
+    local touchConnection
+    touchConnection = collectible.Touched:Connect(function(hit)
+        if hit and hit:IsDescendantOf(character) then
+            local points = collectible:GetAttribute("Points")
+            local grenadeName = collectible:GetAttribute("GrenadeName")
+            
+            collectedGrenades = collectedGrenades + 1
+            totalScore = totalScore + points
+            grenadeAmmo = grenadeAmmo + 1
+            
+            playCollectSound()
+            
+            local floatingText = Instance.new("Part")
+            floatingText.Size = Vector3.new(0.1, 0.1, 0.1)
+            floatingText.Transparency = 1
+            floatingText.Anchored = true
+            floatingText.CanCollide = false
+            floatingText.Position = collectible.Position
+            floatingText.Parent = workspace
+            
+            local textBillboard = Instance.new("BillboardGui")
+            textBillboard.Size = UDim2.new(0, 100, 0, 40)
+            textBillboard.AlwaysOnTop = true
+            textBillboard.Parent = floatingText
+            
+            local floatLabel = Instance.new("TextLabel")
+            floatLabel.Size = UDim2.new(1, 0, 0.5, 0)
+            floatLabel.BackgroundTransparency = 1
+            floatLabel.Text = "+" .. points .. " pts"
+            floatLabel.TextColor3 = Color3.fromRGB(255, 255, 100)
+            floatLabel.TextStrokeTransparency = 0
+            floatLabel.TextScaled = true
+            floatLabel.Font = Enum.Font.GothamBlack
+            floatLabel.Parent = textBillboard
+            
+            local ammoLbl = Instance.new("TextLabel")
+            ammoLbl.Size = UDim2.new(1, 0, 0.5, 0)
+            ammoLbl.Position = UDim2.new(0, 0, 0.5, 0)
+            ammoLbl.BackgroundTransparency = 1
+            ammoLbl.Text = "+1 💣"
+            ammoLbl.TextColor3 = Color3.fromRGB(255, 150, 50)
+            ammoLbl.TextStrokeTransparency = 0
+            ammoLbl.TextScaled = true
+            ammoLbl.Font = Enum.Font.GothamBlack
+            ammoLbl.Parent = textBillboard
+            
+            local startPos2 = floatingText.Position
+            local startTime2 = tick()
+            local floatConnection2
+            floatConnection2 = RunService.Heartbeat:Connect(function()
+                local elapsed = tick() - startTime2
+                if elapsed > 1.5 then
+                    floatingText:Destroy()
+                    floatConnection2:Disconnect()
+                    return
+                end
+                floatingText.Position = startPos2 + Vector3.new(0, elapsed * 3, 0)
+                floatLabel.TextTransparency = elapsed / 1.5
+                floatLabel.TextStrokeTransparency = elapsed / 1.5
+                ammoLbl.TextTransparency = elapsed / 1.5
+                ammoLbl.TextStrokeTransparency = elapsed / 1.5
+            end)
+            
+            collectible:Destroy()
+            touchConnection:Disconnect()
+            
+            print(string.format("Collected %s Grenade! +%d pts, +1 ammo (Total ammo: %d)", grenadeName, points, grenadeAmmo))
+        end
+    end)
+    
+    table.insert(spawnedCollectibles, collectible)
+    print(string.format("Spawned %s Grenade! Chance was %.0f%%", grenadeData.name, chance * 100))
+    
+    return true
+end
+
+local function cleanupCollectibles()
+    for _, collectible in pairs(spawnedCollectibles) do
+        if collectible and collectible.Parent then
+            collectible:Destroy()
+        end
+    end
+    spawnedCollectibles = {}
+    
+    if collectionFolder and collectionFolder.Parent then
+        collectionFolder:Destroy()
+    end
+end
+
+-- UI References
+local cooldownBar = nil
+local cooldownText = nil
+local grenadeButton = nil
+local scoreLabel = nil
+local grenadesLabel = nil
+local ammoLabel = nil
+local spawnTimerLabel = nil
+local collectionFrame = nil
+
+-- GUI
+local function createGui()
+    local g = Instance.new("ScreenGui", gui)
+    g.ResetOnSpawn = false
+    g.Name = "SourceDBG"
+    g.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    -- Main Container
+    local mainFrame = Instance.new("Frame", g)
+    mainFrame.Size = UDim2.new(0, 200, 0, 340)
+    mainFrame.Position = UDim2.new(0, 15, 1, -355)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Name = "MainFrame"
+    
+    local mainCorner = Instance.new("UICorner", mainFrame)
+    mainCorner.CornerRadius = UDim.new(0, 12)
+    
+    local mainStroke = Instance.new("UIStroke", mainFrame)
+    mainStroke.Color = Color3.fromRGB(60, 60, 80)
+    mainStroke.Thickness = 2
+    
+    local shadow = Instance.new("ImageLabel", mainFrame)
+    shadow.Size = UDim2.new(1, 30, 1, 30)
+    shadow.Position = UDim2.new(0, -15, 0, -15)
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://5554236805"
+    shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.ImageTransparency = 0.6
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(23, 23, 277, 277)
+    shadow.ZIndex = -1
+    
+    -- Title
+    local title = Instance.new("TextLabel", mainFrame)
+    title.Size = UDim2.new(1, 0, 0, 35)
+    title.Position = UDim2.new(0, 0, 0, 0)
+    title.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+    title.BorderSizePixel = 0
+    title.Text = "⚡ SOURCE MOVEMENT"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 12
+    title.Font = Enum.Font.GothamBold
+    
+    local titleCorner = Instance.new("UICorner", title)
+    titleCorner.CornerRadius = UDim.new(0, 12)
+    
+    local titleFix = Instance.new("Frame", title)
+    titleFix.Size = UDim2.new(1, 0, 0.5, 0)
+    titleFix.Position = UDim2.new(0, 0, 0.5, 0)
+    titleFix.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+    titleFix.BorderSizePixel = 0
+    titleFix.ZIndex = 0
+    
+    local statusDot = Instance.new("Frame", title)
+    statusDot.Size = UDim2.new(0, 8, 0, 8)
+    statusDot.Position = UDim2.new(0, 10, 0.5, -4)
+    statusDot.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
+    statusDot.BorderSizePixel = 0
+    statusDot.Name = "StatusDot"
+    
+    local dotCorner = Instance.new("UICorner", statusDot)
+    dotCorner.CornerRadius = UDim.new(1, 0)
+    
+    -- Toggle Button
+    local toggle = Instance.new("TextButton", mainFrame)
+    toggle.Size = UDim2.new(1, -20, 0, 32)
+    toggle.Position = UDim2.new(0, 10, 0, 42)
+    toggle.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
+    toggle.BorderSizePixel = 0
+    toggle.Text = "✓ ENABLED"
+    toggle.TextColor3 = Color3.fromRGB(20, 60, 30)
+    toggle.TextSize = 14
+    toggle.Font = Enum.Font.GothamBold
+    toggle.Name = "ToggleButton"
+    
+    local toggleCorner = Instance.new("UICorner", toggle)
+    toggleCorner.CornerRadius = UDim.new(0, 8)
+
+    -- Mode Button
+    local modeButton = Instance.new("TextButton", mainFrame)
+    modeButton.Size = UDim2.new(1, -20, 0, 32)
+    modeButton.Position = UDim2.new(0, 10, 0, 80)
+    modeButton.BackgroundColor3 = gameModes[currentModeIndex].color
+    modeButton.BorderSizePixel = 0
+    modeButton.Text = gameModes[currentModeIndex].icon .. " " .. gameModes[currentModeIndex].name
+    modeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    modeButton.TextSize = 13
+    modeButton.Font = Enum.Font.GothamBold
+    modeButton.Name = "ModeButton"
+    
+    local modeCorner = Instance.new("UICorner", modeButton)
+    modeCorner.CornerRadius = UDim.new(0, 8)
+    
+    local modeStroke = Instance.new("UIStroke", modeButton)
+    modeStroke.Color = Color3.fromRGB(255, 255, 255)
+    modeStroke.Transparency = 0.7
+    modeStroke.Thickness = 1
+    
+    -- Mode Description
+    local modeDesc = Instance.new("TextLabel", mainFrame)
+    modeDesc.Size = UDim2.new(1, -20, 0, 18)
+    modeDesc.Position = UDim2.new(0, 10, 0, 115)
+    modeDesc.BackgroundTransparency = 1
+    modeDesc.Text = getCurrentMode().description
+    modeDesc.TextColor3 = Color3.fromRGB(180, 180, 180)
+    modeDesc.TextSize = 10
+    modeDesc.Font = Enum.Font.Gotham
+    modeDesc.TextWrapped = true
+    modeDesc.Name = "ModeDescription"
+
+    -- Event Display Frame
+    local eventFrame = Instance.new("Frame", mainFrame)
+    eventFrame.Size = UDim2.new(1, -20, 0, 35)
+    eventFrame.Position = UDim2.new(0, 10, 0, 136)
+    eventFrame.BackgroundColor3 = Color3.fromRGB(40, 35, 50)
+    eventFrame.BorderSizePixel = 0
+    eventFrame.Name = "EventFrame"
+    
+    local eventFrameCorner = Instance.new("UICorner", eventFrame)
+    eventFrameCorner.CornerRadius = UDim.new(0, 6)
+    
+    local eventTitle = Instance.new("TextLabel", eventFrame)
+    eventTitle.Size = UDim2.new(0, 50, 0, 14)
+    eventTitle.Position = UDim2.new(0, 5, 0, 2)
+    eventTitle.BackgroundTransparency = 1
+    eventTitle.Text = "EVENT"
+    eventTitle.TextColor3 = Color3.fromRGB(150, 150, 150)
+    eventTitle.TextSize = 9
+    eventTitle.Font = Enum.Font.GothamBold
+    eventTitle.TextXAlignment = Enum.TextXAlignment.Left
+    
+    eventLabel = Instance.new("TextLabel", eventFrame)
+    eventLabel.Size = UDim2.new(1, -10, 0, 16)
+    eventLabel.Position = UDim2.new(0, 5, 0, 16)
+    eventLabel.BackgroundTransparency = 1
+    eventLabel.Text = "None active"
+    eventLabel.TextColor3 = Color3.fromRGB(100, 100, 100)
+    eventLabel.TextSize = 11
+    eventLabel.Font = Enum.Font.GothamBold
+    eventLabel.TextXAlignment = Enum.TextXAlignment.Left
+    eventLabel.Name = "EventLabel"
+    
+    eventTimerLabel = Instance.new("TextLabel", eventFrame)
+    eventTimerLabel.Size = UDim2.new(0, 40, 0, 14)
+    eventTimerLabel.Position = UDim2.new(1, -45, 0, 2)
+    eventTimerLabel.BackgroundTransparency = 1
+    eventTimerLabel.Text = ""
+    eventTimerLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+    eventTimerLabel.TextSize = 10
+    eventTimerLabel.Font = Enum.Font.GothamBold
+    eventTimerLabel.TextXAlignment = Enum.TextXAlignment.Right
+    eventTimerLabel.Name = "EventTimerLabel"
+
+    -- Ammo Display
+    local ammoFrame = Instance.new("Frame", mainFrame)
+    ammoFrame.Size = UDim2.new(1, -20, 0, 28)
+    ammoFrame.Position = UDim2.new(0, 10, 0, 176)
+    ammoFrame.BackgroundColor3 = Color3.fromRGB(50, 40, 30)
+    ammoFrame.BorderSizePixel = 0
+    ammoFrame.Name = "AmmoFrame"
+    
+    local ammoFrameCorner = Instance.new("UICorner", ammoFrame)
+    ammoFrameCorner.CornerRadius = UDim.new(0, 6)
+    
+    local ammoIcon = Instance.new("TextLabel", ammoFrame)
+    ammoIcon.Size = UDim2.new(0, 30, 1, 0)
+    ammoIcon.Position = UDim2.new(0, 5, 0, 0)
+    ammoIcon.BackgroundTransparency = 1
+    ammoIcon.Text = "💣"
+    ammoIcon.TextSize = 16
+    ammoIcon.Font = Enum.Font.GothamBold
+    
+    ammoLabel = Instance.new("TextLabel", ammoFrame)
+    ammoLabel.Size = UDim2.new(0, 60, 1, 0)
+    ammoLabel.Position = UDim2.new(0, 35, 0, 0)
+    ammoLabel.BackgroundTransparency = 1
+    ammoLabel.Text = "∞"
+    ammoLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+    ammoLabel.TextSize = 16
+    ammoLabel.Font = Enum.Font.GothamBlack
+    ammoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    ammoLabel.Name = "AmmoLabel"
+    
+    local ammoHint = Instance.new("TextLabel", ammoFrame)
+    ammoHint.Size = UDim2.new(0, 80, 1, 0)
+    ammoHint.Position = UDim2.new(1, -85, 0, 0)
+    ammoHint.BackgroundTransparency = 1
+    ammoHint.Text = "[X] Throw"
+    ammoHint.TextColor3 = Color3.fromRGB(150, 150, 150)
+    ammoHint.TextSize = 10
+    ammoHint.Font = Enum.Font.Gotham
+    ammoHint.TextXAlignment = Enum.TextXAlignment.Right
+    ammoHint.Name = "AmmoHint"
+
+    -- Collection Stats Frame
+    collectionFrame = Instance.new("Frame", mainFrame)
+    collectionFrame.Size = UDim2.new(1, -20, 0, 55)
+    collectionFrame.Position = UDim2.new(0, 10, 0, 208)
+    collectionFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    collectionFrame.BorderSizePixel = 0
+    collectionFrame.Name = "CollectionFrame"
+    collectionFrame.Visible = isCollectionMode()
+    
+    local collectionCorner = Instance.new("UICorner", collectionFrame)
+    collectionCorner.CornerRadius = UDim.new(0, 8)
+    
+    local collectionTitle = Instance.new("TextLabel", collectionFrame)
+    collectionTitle.Size = UDim2.new(1, 0, 0, 18)
+    collectionTitle.Position = UDim2.new(0, 0, 0, 2)
+    collectionTitle.BackgroundTransparency = 1
+    collectionTitle.Text = "💣 GRENADE HUNT"
+    collectionTitle.TextColor3 = Color3.fromRGB(255, 120, 50)
+    collectionTitle.TextSize = 11
+    collectionTitle.Font = Enum.Font.GothamBold
+    
+    scoreLabel = Instance.new("TextLabel", collectionFrame)
+    scoreLabel.Size = UDim2.new(0.5, -5, 0, 16)
+    scoreLabel.Position = UDim2.new(0, 5, 0, 20)
+    scoreLabel.BackgroundTransparency = 1
+    scoreLabel.Text = "Score: 0"
+    scoreLabel.TextColor3 = Color3.fromRGB(255, 255, 100)
+    scoreLabel.TextSize = 11
+    scoreLabel.Font = Enum.Font.GothamBold
+    scoreLabel.TextXAlignment = Enum.TextXAlignment.Left
+    scoreLabel.Name = "ScoreLabel"
+    
+    grenadesLabel = Instance.new("TextLabel", collectionFrame)
+    grenadesLabel.Size = UDim2.new(0.5, -5, 0, 16)
+    grenadesLabel.Position = UDim2.new(0.5, 0, 0, 20)
+    grenadesLabel.BackgroundTransparency = 1
+    grenadesLabel.Text = "Collected: 0"
+    grenadesLabel.TextColor3 = Color3.fromRGB(255, 150, 100)
+    grenadesLabel.TextSize = 11
+    grenadesLabel.Font = Enum.Font.GothamBold
+    grenadesLabel.TextXAlignment = Enum.TextXAlignment.Left
+    grenadesLabel.Name = "GrenadesLabel"
+    
+    spawnTimerLabel = Instance.new("TextLabel", collectionFrame)
+    spawnTimerLabel.Size = UDim2.new(1, -10, 0, 16)
+    spawnTimerLabel.Position = UDim2.new(0, 5, 0, 36)
+    spawnTimerLabel.BackgroundTransparency = 1
+    spawnTimerLabel.Text = "Next spawn: --"
+    spawnTimerLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
+    spawnTimerLabel.TextSize = 10
+    spawnTimerLabel.Font = Enum.Font.Gotham
+    spawnTimerLabel.TextXAlignment = Enum.TextXAlignment.Left
+    spawnTimerLabel.Name = "SpawnTimerLabel"
+
+    -- Grenade Cooldown Display
+    local cooldownFrame = Instance.new("Frame", mainFrame)
+    cooldownFrame.Size = UDim2.new(1, -20, 0, 28)
+    cooldownFrame.Position = UDim2.new(0, 10, 0, 208)
+    cooldownFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    cooldownFrame.BorderSizePixel = 0
+    cooldownFrame.Name = "CooldownFrame"
+    cooldownFrame.Visible = getCurrentMode().grenadeCooldown > 0 and not isCollectionMode()
+    
+    local cooldownFrameCorner = Instance.new("UICorner", cooldownFrame)
+    cooldownFrameCorner.CornerRadius = UDim.new(0, 6)
+    
+    local cooldownLabel = Instance.new("TextLabel", cooldownFrame)
+    cooldownLabel.Size = UDim2.new(0, 50, 1, 0)
+    cooldownLabel.Position = UDim2.new(0, 5, 0, 0)
+    cooldownLabel.BackgroundTransparency = 1
+    cooldownLabel.Text = "💣 CD:"
+    cooldownLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    cooldownLabel.TextSize = 10
+    cooldownLabel.Font = Enum.Font.GothamBold
+    cooldownLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local cooldownBarBg = Instance.new("Frame", cooldownFrame)
+    cooldownBarBg.Size = UDim2.new(1, -90, 0, 12)
+    cooldownBarBg.Position = UDim2.new(0, 50, 0.5, -6)
+    cooldownBarBg.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    cooldownBarBg.BorderSizePixel = 0
+    
+    local cooldownBarBgCorner = Instance.new("UICorner", cooldownBarBg)
+    cooldownBarBgCorner.CornerRadius = UDim.new(0, 4)
+    
+    cooldownBar = Instance.new("Frame", cooldownBarBg)
+    cooldownBar.Size = UDim2.new(1, 0, 1, 0)
+    cooldownBar.Position = UDim2.new(0, 0, 0, 0)
+    cooldownBar.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
+    cooldownBar.BorderSizePixel = 0
+    cooldownBar.Name = "CooldownFill"
+    
+    local cooldownBarFillCorner = Instance.new("UICorner", cooldownBar)
+    cooldownBarFillCorner.CornerRadius = UDim.new(0, 4)
+    
+    cooldownText = Instance.new("TextLabel", cooldownFrame)
+    cooldownText.Size = UDim2.new(0, 35, 1, 0)
+    cooldownText.Position = UDim2.new(1, -40, 0, 0)
+    cooldownText.BackgroundTransparency = 1
+    cooldownText.Text = "READY"
+    cooldownText.TextColor3 = Color3.fromRGB(80, 255, 130)
+    cooldownText.TextSize = 9
+    cooldownText.Font = Enum.Font.GothamBold
+    cooldownText.TextXAlignment = Enum.TextXAlignment.Right
+    cooldownText.Name = "CooldownText"
+    
+    -- Destroy Button
+    local destroy = Instance.new("TextButton", mainFrame)
+    destroy.Size = UDim2.new(1, -20, 0, 28)
+    destroy.Position = UDim2.new(0, 10, 1, -38)
+    destroy.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    destroy.BorderSizePixel = 0
+    destroy.Text = "🗑️ DESTROY SCRIPT"
+    destroy.TextColor3 = Color3.fromRGB(255, 255, 255)
+    destroy.TextSize = 11
+    destroy.Font = Enum.Font.GothamBold
+    
+    local destroyCorner = Instance.new("UICorner", destroy)
+    destroyCorner.CornerRadius = UDim.new(0, 6)
+
+    -- Button Functions
+    destroy.MouseButton1Click:Connect(function()
+        humanoid.WalkSpeed = 16
+        humanoid.JumpPower = 50
+        
+        cleanupCollectibles()
+        endEvent()
+
+        for _, c in pairs(getconnections(RunService.Heartbeat)) do
+            if c.Function then c:Disconnect() end
+        end
+
+        g:Destroy()
+        scriptEnabled = false
+        script:Destroy()
+    end)
+
+    toggle.MouseButton1Click:Connect(function()
+        scriptEnabled = not scriptEnabled
+        if scriptEnabled then
+            toggle.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
+            toggle.Text = "✓ ENABLED"
+            toggle.TextColor3 = Color3.fromRGB(20, 60, 30)
+            statusDot.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
+            
+            if isCollectionMode() then
+                createCollectionFolder()
+            end
+            
+            if isMobile then
+                local jumpBtn = g:FindFirstChild("JumpButton")
+                if jumpBtn then jumpBtn.Visible = true end
+                if grenadeButton then 
+                    grenadeButton.Visible = true
+                end
+            end
+        else
+            toggle.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+            toggle.Text = "✗ DISABLED"
+            toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+            statusDot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+            humanoid.WalkSpeed = 16
+            humanoid.JumpPower = 50
+            velocity = Vector3.new()
+            
+            cleanupCollectibles()
+            endEvent()
+            
+            if isMobile then
+                local jumpBtn = g:FindFirstChild("JumpButton")
+                if jumpBtn then jumpBtn.Visible = false end
+                if grenadeButton then grenadeButton.Visible = false end
+            end
+            
+            for _, sound in pairs(root:GetChildren()) do
+                if sound:IsA("Sound") then
+                    sound.Volume = 0.5
+                end
+            end
+            for _, sound in pairs(humanoid:GetChildren()) do
+                if sound:IsA("Sound") then
+                    sound.Volume = 0.5
+                end
+            end
+        end
+    end)
+
+    modeButton.MouseButton1Click:Connect(function()
+        if isCollectionMode() then
+            cleanupCollectibles()
+        end
+        endEvent()
+        
+        currentModeIndex = currentModeIndex + 1
+        if currentModeIndex > #gameModes then
+            currentModeIndex = 1
+        end
+        
+        local mode = getCurrentMode()
+        modeButton.Text = mode.icon .. " " .. mode.name
+        modeDesc.Text = mode.description
+        
+        TweenService:Create(modeButton, TweenInfo.new(0.3), {BackgroundColor3 = mode.color}):Play()
+        
+        collectionFrame.Visible = isCollectionMode()
+        cooldownFrame.Visible = mode.grenadeCooldown > 0 and not isCollectionMode()
+        
+        if isCollectionMode() and scriptEnabled then
+            createCollectionFolder()
+            lastSpawnTime = tick()
+        end
+        
+        collectedGrenades = 0
+        totalScore = 0
+        grenadeAmmo = 0
+        lastEventCheck = tick()
+    end)
+
+    -- Mobile Controls
+    if isMobile then
+        grenadeButton = Instance.new("TextButton", g)
+        grenadeButton.Size = UDim2.new(0, 75, 0, 75)
+        grenadeButton.Position = UDim2.new(1, -95, 0.5, -40)
+        grenadeButton.BackgroundColor3 = Color3.fromRGB(255, 120, 50)
+        grenadeButton.BorderSizePixel = 0
+        grenadeButton.Text = "💣"
+        grenadeButton.TextSize = 30
+        grenadeButton.Font = Enum.Font.GothamBold
+        grenadeButton.Name = "GrenadeButton"
+        grenadeButton.Visible = true
+        
+        local grenadeCorner = Instance.new("UICorner", grenadeButton)
+        grenadeCorner.CornerRadius = UDim.new(0.5, 0)
+        
+        local grenadeStroke = Instance.new("UIStroke", grenadeButton)
+        grenadeStroke.Color = Color3.fromRGB(255, 255, 255)
+        grenadeStroke.Transparency = 0.5
+        grenadeStroke.Thickness = 3
+        
+        local buttonAmmoLabel = Instance.new("TextLabel", grenadeButton)
+        buttonAmmoLabel.Size = UDim2.new(1, 0, 0, 20)
+        buttonAmmoLabel.Position = UDim2.new(0, 0, 1, 5)
+        buttonAmmoLabel.BackgroundTransparency = 1
+        buttonAmmoLabel.Text = "∞"
+        buttonAmmoLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+        buttonAmmoLabel.TextSize = 14
+        buttonAmmoLabel.Font = Enum.Font.GothamBold
+        buttonAmmoLabel.Name = "ButtonAmmoLabel"
+        
+        local grenadeCooldownOverlay = Instance.new("Frame", grenadeButton)
+        grenadeCooldownOverlay.Size = UDim2.new(1, 0, 0, 0)
+        grenadeCooldownOverlay.Position = UDim2.new(0, 0, 1, 0)
+        grenadeCooldownOverlay.AnchorPoint = Vector2.new(0, 1)
+        grenadeCooldownOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        grenadeCooldownOverlay.BackgroundTransparency = 0.5
+        grenadeCooldownOverlay.BorderSizePixel = 0
+        grenadeCooldownOverlay.Name = "CooldownOverlay"
+        grenadeCooldownOverlay.ZIndex = 2
+        
+        local overlayCorner = Instance.new("UICorner", grenadeCooldownOverlay)
+        overlayCorner.CornerRadius = UDim.new(0.5, 0)
+        
+        grenadeButton.MouseButton1Click:Connect(function()
+            local success = throwGrenade()
+            if not success then
+                TweenService:Create(grenadeButton, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(100, 50, 50)}):Play()
+                task.delay(0.1, function()
+                    TweenService:Create(grenadeButton, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(255, 120, 50)}):Play()
+                end)
+            end
+        end)
+        
+        local jumpButton = Instance.new("TextButton", g)
+        jumpButton.Size = UDim2.new(0, 75, 0, 75)
+        jumpButton.Position = UDim2.new(1, -95, 1, -95)
+        jumpButton.BackgroundColor3 = Color3.fromRGB(60, 140, 255)
+        jumpButton.BorderSizePixel = 0
+        jumpButton.Text = "⬆️"
+        jumpButton.TextSize = 30
+        jumpButton.Font = Enum.Font.GothamBold
+        jumpButton.Name = "JumpButton"
+        
+        local jumpCorner = Instance.new("UICorner", jumpButton)
+        jumpCorner.CornerRadius = UDim.new(0.5, 0)
+        
+        local jumpStroke = Instance.new("UIStroke", jumpButton)
+        jumpStroke.Color = Color3.fromRGB(255, 255, 255)
+        jumpStroke.Transparency = 0.5
+        jumpStroke.Thickness = 3
+        
+        jumpButton.MouseButton1Down:Connect(function()
+            spaceHeld = true
+            jumpButton.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+        end)
+        
+        jumpButton.MouseButton1Up:Connect(function()
+            spaceHeld = false
+            jumpButton.BackgroundColor3 = Color3.fromRGB(60, 140, 255)
+        end)
+        
+        task.spawn(function()
+            while g and g.Parent do
+                task.wait(0.05)
+                local mode = getCurrentMode()
+                
+                if grenadeButton then
+                    local buttonAmmo = grenadeButton:FindFirstChild("ButtonAmmoLabel")
+                    local overlay = grenadeButton:FindFirstChild("CooldownOverlay")
+                    
+                    if buttonAmmo then
+                        if hasUnlimitedGrenades() then
+                            buttonAmmo.Text = "∞"
+                            buttonAmmo.TextColor3 = Color3.fromRGB(100, 255, 100)
+                        else
+                            buttonAmmo.Text = tostring(grenadeAmmo)
+                            if grenadeAmmo > 0 then
+                                buttonAmmo.TextColor3 = Color3.fromRGB(255, 200, 100)
+                            else
+                                buttonAmmo.TextColor3 = Color3.fromRGB(255, 100, 100)
+                            end
+                        end
+                    end
+                    
+                    if overlay and mode.grenadeCooldown > 0 then
+                        local canUse, remaining, reason = canUseGrenade()
+                        if reason == "COOLDOWN" and remaining > 0 then
+                            local percent = remaining / mode.grenadeCooldown
+                            overlay.Size = UDim2.new(1, 0, percent, 0)
+                        else
+                            overlay.Size = UDim2.new(1, 0, 0, 0)
+                        end
+                    elseif overlay then
+                        overlay.Size = UDim2.new(1, 0, 0, 0)
+                    end
+                end
+            end
+        end)
+    end
+    
+    -- Update UI elements continuously
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(0.05)
+            
+            local mode = getCurrentMode()
+            local cooldownFrame2 = mainFrame:FindFirstChild("CooldownFrame")
+            
+            -- Update ammo display
+            if ammoLabel then
+                if hasUnlimitedGrenades() then
+                    ammoLabel.Text = "∞"
+                    ammoLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                else
+                    ammoLabel.Text = tostring(grenadeAmmo)
+                    if grenadeAmmo > 0 then
+                        ammoLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+                    else
+                        ammoLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                    end
+                end
+            end
+            
+            -- Update event display
+            if eventLabel and eventTimerLabel then
+                if currentEvent then
+                    local remaining = math.max(0, eventEndTime - tick())
+                    eventLabel.Text = currentEvent.icon .. " " .. currentEvent.name
+                    eventLabel.TextColor3 = currentEvent.color
+                    eventTimerLabel.Text = string.format("%.1fs", remaining)
+                else
+                    eventLabel.Text = "None active"
+                    eventLabel.TextColor3 = Color3.fromRGB(100, 100, 100)
+                    eventTimerLabel.Text = ""
+                end
+            end
+            
+            -- Update grenade cooldown bar
+            if cooldownFrame2 and cooldownFrame2.Visible then
+                local canUse, remaining, reason = canUseGrenade()
+                if cooldownBar and cooldownText then
+                    if reason == "COOLDOWN" and remaining > 0 then
+                        local percent = 1 - (remaining / mode.grenadeCooldown)
+                        cooldownBar.Size = UDim2.new(percent, 0, 1, 0)
+                        cooldownBar.BackgroundColor3 = Color3.fromRGB(255, 100, 100):Lerp(Color3.fromRGB(80, 255, 130), percent)
+                        cooldownText.Text = string.format("%.1fs", remaining)
+                        cooldownText.TextColor3 = Color3.fromRGB(255, 150, 150)
+                    else
+                        cooldownBar.Size = UDim2.new(1, 0, 1, 0)
+                        cooldownBar.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
+                        cooldownText.Text = "READY"
+                        cooldownText.TextColor3 = Color3.fromRGB(80, 255, 130)
+                    end
+                end
+            end
+            
+            -- Update collection stats
+            if collectionFrame and collectionFrame.Visible then
+                if scoreLabel then
+                    scoreLabel.Text = "Score: " .. totalScore
+                end
+                if grenadesLabel then
+                    grenadesLabel.Text = "Collected: " .. collectedGrenades
+                end
+                if spawnTimerLabel then
+                    local interval = getSpawnInterval()
+                    local elapsed = tick() - lastSpawnTime
+                    local remaining = math.max(0, interval - elapsed)
+                    local chance = getSpawnChance()
+                    spawnTimerLabel.Text = string.format("Next: %.1fs (%.0f%% chance)", remaining, chance * 100)
+                end
+            end
+        end
+    end)
+    
+    -- Collection mode spawn loop
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(0.5)
+            
+            if scriptEnabled and isCollectionMode() then
+                local interval = getSpawnInterval()
+                local elapsed = tick() - lastSpawnTime
+                
+                if elapsed >= interval then
+                    lastSpawnTime = tick()
+                    spawnCollectible()
+                end
+            end
+        end
+    end)
+    
+    -- Event system loop
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(1)
+            
+            if scriptEnabled then
+                -- Check if current event should end
+                if currentEvent and tick() >= eventEndTime then
+                    endEvent()
+                end
+                
+                -- Try to trigger new event
+                local elapsed = tick() - lastEventCheck
+                if elapsed >= eventCheckInterval and not currentEvent then
+                    lastEventCheck = tick()
+                    tryTriggerEvent()
+                end
+            end
+        end
+    end)
+    
+    -- Raining bombs loop
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(0.8 + math.random() * 0.7) -- Random interval 0.8-1.5s
+            
+            if scriptEnabled and rainingBombsActive then
+                spawnFallingBomb()
+            end
+        end
+    end)
+end
+
+createGui()
+
+-- Initialize
+if isCollectionMode() then
+    createCollectionFolder()
+    lastSpawnTime = tick()
+end
+lastEventCheck = tick()
+
+task.spawn(function()
+    while true do
+        task.wait()
+        if scriptEnabled then
+            for _, sound in pairs(root:GetChildren()) do
+                if sound:IsA("Sound") then
+                    sound.Volume = 0
+                end
+            end
+            
+            for _, sound in pairs(humanoid:GetChildren()) do
+                if sound:IsA("Sound") then
+                    sound.Volume = 0
+                end
+            end
+        end
+    end
+end)
+
+local function grounded()
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {character}
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local result = workspace:Raycast(root.Position, Vector3.new(0, -3.8, 0), rayParams)
+    
+    if result and result.Instance then
+        return result.Instance.CanCollide
+    end
+    
+    return false
+end
+
+local function applyFriction(dt)
+    local speed = velocity.Magnitude
+    if speed < 0.1 then
+        velocity = Vector3.new()
+        return
+    end
+
+    local drop = 0
+    if isGrounded then
+        local control = math.max(speed, cfg.stopSpeed)
+        drop = control * cfg.friction * dt
+    end
+
+    local newSpeed = math.max(speed - drop, 0)
+    if newSpeed ~= speed then
+        velocity = velocity * (newSpeed / speed)
+    end
+end
+
+local function accel(wishDir, wishSpeed, accelVal, dt)
+    local cur = velocity:Dot(wishDir)
+    local add = wishSpeed - cur
+    if add <= 0 then return end
+
+    local accelSpeed = math.min(accelVal * dt * wishSpeed, add)
+    velocity = velocity + wishDir * accelSpeed
+end
+
+local function process(dt)
+    if not scriptEnabled then return end
+
+    humanoid.WalkSpeed = 0
+    humanoid.JumpPower = 0
+
+    wasGrounded = isGrounded
+    isGrounded = grounded()
+
+    if isGrounded and not wasGrounded and velocity.Y < -5 and not spaceHeld then
+        playLand()
+        footstepTimer = 0
+    end
+
+    local camLook = workspace.CurrentCamera.CFrame.LookVector
+    local flat = Vector3.new(camLook.X, 0, camLook.Z)
+
+    if flat.Magnitude > 0.01 then
+        root.CFrame = CFrame.new(root.Position, root.Position + flat)
+    end
+
+    local cam = workspace.CurrentCamera
+    local fwd = cam.CFrame.LookVector
+    local right = cam.CFrame.RightVector
+
+    fwd = Vector3.new(fwd.X, 0, fwd.Z).Unit
+    right = Vector3.new(right.X, 0, right.Z).Unit
+
+    local input = Vector3.new()
+
+    if isMobile then
+        local moveVector = humanoid.MoveDirection
+        if moveVector.Magnitude > 0 then
+            input = moveVector
+        end
+    else
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then input += fwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then input -= fwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then input -= right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then input += right end
+    end
+
+    if input.Magnitude > 0 then
+        input = input.Unit
+    end
+
+    moveDir = input
+
+    local currentMaxAirSpeed = cfg.maxAirSpeed
+    if isHardMode() then
+        currentMaxAirSpeed = cfg.maxAirSpeed * 0.3
+    end
+
+    local effectiveGravity = getEffectiveGravity()
+
+    if isGrounded then
+        applyFriction(dt)
+        accel(moveDir, cfg.runSpeed, cfg.groundAccel, dt)
+
+        if moveDir.Magnitude > 0.1 then
+            footstepTimer = footstepTimer + dt
+            if footstepTimer >= footstepInterval then
+                playFootstep()
+                footstepTimer = 0
+            end
+        else
+            footstepTimer = 0
+        end
+
+        if spaceHeld then
+            velocity = Vector3.new(velocity.X, cfg.jumpPower, velocity.Z)
+            playJump()
+        else
+            velocity = Vector3.new(velocity.X, 0, velocity.Z)
+        end
+    else
+        accel(moveDir, currentMaxAirSpeed, cfg.airAccel, dt)
+        velocity += Vector3.new(0, -effectiveGravity * dt, 0)
+    end
+
+    root.AssemblyLinearVelocity = velocity
+end
+
+UserInputService.InputBegan:Connect(function(i)
+    if i.KeyCode == Enum.KeyCode.Space then
+        spaceHeld = true
+    elseif i.KeyCode == Enum.KeyCode.X and scriptEnabled and not isMobile then
+        throwGrenade()
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(i)
+    if i.KeyCode == Enum.KeyCode.Space then
+        spaceHeld = false
+    end
+end)
+
+RunService.Heartbeat:Connect(function(dt)
+    if humanoid and humanoid.Health > 0 then
+        process(dt)
+    end
+end)
+
+player.CharacterAdded:Connect(function(char)
+    character = char
+    humanoid = char:WaitForChild("Humanoid")
+    root = char:WaitForChild("HumanoidRootPart")
+    velocity = Vector3.new()
+    
+    if isCollectionMode() and scriptEnabled then
+        createCollectionFolder()
+        lastSpawnTime = tick()
+    end
+end)
+
+print("Source Movement successfully Loaded")
+print("Game Modes Available:")
+print("  🎮 Default - Unlimited grenades")
+print("  🔍 Scavenger - Collect grenades to throw! 10s spawn, 70% chance")
+print("  💀 Hard - Unlimited grenades with 3s cooldown, reduced air control")
+print("  🔥 Hard Scavenger - Collect to throw! 15s spawn, 35-40% chance, 1s CD")
+print("")
+print("Events:")
+print("  💥 Raining Bombs - Bombs fall! Survive to earn grenades (Scavenger only)")
+print("  🌙 Moon Gravity - Gravity reduced by 10")
+print("  🍀 Lucky Day - +20% spawn chance, 6.35s interval")
+print("")
+print("Press [X] or tap grenade button to throw!")
