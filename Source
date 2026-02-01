@@ -1,5 +1,5 @@
 -- Source Engine Movement for Roblox
--- Improved UI + Hard Mode Grenade Cooldown + Grenade Collection & Throwing + Events
+-- Improved UI + Hard Mode Grenade Cooldown + Grenade Collection & Throwing + Events + Crafting
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -37,26 +37,55 @@ local spawnedCollectibles = {}
 local lastSpawnTime = 0
 local collectionFolder = nil
 
+-- Crafting System
+local metalCount = 0
+local lastMetalTime = 0
+local METAL_INTERVAL = 3
+
+-- Crafting Recipes
+local CRAFTING_RECIPES = {
+    Scavenger = {
+        metalPerTick = 1,
+        metalRequired = 3,
+        grenadesProduced = 3
+    },
+    ["Hard Scavenger"] = {
+        metalPerTick = 0.5,
+        metalRequired = 4,
+        grenadesProduced = 1
+    }
+}
+
 -- Event System
 local currentEvent = nil
 local eventEndTime = 0
 local lastEventCheck = 0
-local eventCheckInterval = 30 -- Check for new event every 30 seconds
+local eventCheckInterval = 25
 local gravityModifier = 0
 local spawnChanceBonus = 0
 local spawnIntervalOverride = nil
 local eventLabel = nil
 local eventTimerLabel = nil
 local rainingBombsActive = false
+local metalMultiplier = 1
+local speedMultiplier = 1
+local grenadeRainActive = false
+local magnetActive = false
 
--- Events Configuration
+-- UI References for Crafting
+local metalLabel = nil
+local craftingBar = nil
+local craftingFrame = nil
+local craftButton = nil
+
+-- Events Configuration (8 Events - No Shield)
 local EVENTS = {
     {
         name = "Raining Bombs",
         icon = "💥",
         color = Color3.fromRGB(255, 50, 50),
         duration = 15,
-        chance = 0.20,
+        chance = 0.14,
         description = "Bombs fall from sky! Dodge or collect!"
     },
     {
@@ -64,7 +93,7 @@ local EVENTS = {
         icon = "🌙",
         color = Color3.fromRGB(150, 150, 255),
         duration = 20,
-        chance = 0.25,
+        chance = 0.15,
         description = "Gravity reduced by 10!"
     },
     {
@@ -72,8 +101,48 @@ local EVENTS = {
         icon = "🍀",
         color = Color3.fromRGB(100, 255, 100),
         duration = 25,
-        chance = 0.22,
+        chance = 0.14,
         description = "+20% spawn chance, 6.35s interval!"
+    },
+    {
+        name = "Double Metal",
+        icon = "⚙️",
+        color = Color3.fromRGB(200, 150, 50),
+        duration = 18,
+        chance = 0.14,
+        description = "2x metal gain!"
+    },
+    {
+        name = "Speed Boost",
+        icon = "⚡",
+        color = Color3.fromRGB(255, 255, 0),
+        duration = 15,
+        chance = 0.13,
+        description = "1.5x movement speed!"
+    },
+    {
+        name = "Grenade Rain",
+        icon = "🎁",
+        color = Color3.fromRGB(255, 100, 200),
+        duration = 12,
+        chance = 0.12,
+        description = "Free grenades fall from sky!"
+    },
+    {
+        name = "Metal Shower",
+        icon = "🌟",
+        color = Color3.fromRGB(255, 215, 0),
+        duration = 1,
+        chance = 0.10,
+        description = "Instant +5 metal!"
+    },
+    {
+        name = "Magnet",
+        icon = "🧲",
+        color = Color3.fromRGB(255, 50, 100),
+        duration = 15,
+        chance = 0.12,
+        description = "Collectibles pulled towards you!"
     },
 }
 
@@ -248,7 +317,7 @@ end
 
 local function playEventSound()
     local sound = Instance.new("Sound", workspace)
-    sound.SoundId = "rbxassetid://5153734236" -- Alert/event sound
+    sound.SoundId = "rbxassetid://5153734236"
     sound.Volume = 1.0
     sound.PlaybackSpeed = 1.0
     sound:Play()
@@ -257,9 +326,45 @@ end
 
 local function playBombWarningSound()
     local sound = Instance.new("Sound", workspace)
-    sound.SoundId = "rbxassetid://5153734236" -- Warning sound
+    sound.SoundId = "rbxassetid://5153734236"
     sound.Volume = 0.8
     sound.PlaybackSpeed = 1.5
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playMetalCollectSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://9119633564"
+    sound.Volume = 0.4
+    sound.PlaybackSpeed = 1.2 + math.random(-10, 10) / 100
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playCraftingSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://9119633564"
+    sound.Volume = 1.0
+    sound.PlaybackSpeed = 0.8
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playErrorSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://138090596"
+    sound.Volume = 0.6
+    sound.PlaybackSpeed = 0.8
+    sound:Play()
+    Debris:AddItem(sound, 2)
+end
+
+local function playGiftSound()
+    local sound = Instance.new("Sound", workspace)
+    sound.SoundId = "rbxassetid://9114374535"
+    sound.Volume = 1.0
+    sound.PlaybackSpeed = 1.2
     sound:Play()
     Debris:AddItem(sound, 2)
 end
@@ -340,7 +445,7 @@ local function getSpawnChance()
     if mode.name == "Hard Scavenger" then
         baseChance = 0.35 + math.random() * 0.05
     end
-    return math.min(baseChance + spawnChanceBonus, 1.0) -- Cap at 100%
+    return math.min(baseChance + spawnChanceBonus, 1.0)
 end
 
 local function getSpawnInterval()
@@ -354,12 +459,184 @@ local function getEffectiveGravity()
     return cfg.gravity - gravityModifier
 end
 
+local function getEffectiveRunSpeed()
+    return cfg.runSpeed * speedMultiplier
+end
+
+local function getCraftingRecipe()
+    local mode = getCurrentMode()
+    return CRAFTING_RECIPES[mode.name]
+end
+
+local function hasCraftingEnabled()
+    local recipe = getCraftingRecipe()
+    return recipe ~= nil
+end
+
+local function canCraft()
+    local recipe = getCraftingRecipe()
+    if not recipe then return false end
+    return metalCount >= recipe.metalRequired
+end
+
+-- Crafting Functions
+local function showCraftingNotification(grenadesProduced)
+    local g = gui:FindFirstChild("SourceDBG")
+    if not g then return end
+    
+    local notif = Instance.new("Frame", g)
+    notif.Size = UDim2.new(0, 250, 0, 50)
+    notif.Position = UDim2.new(0.5, -125, 0, -60)
+    notif.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+    notif.BorderSizePixel = 0
+    notif.Name = "CraftNotification"
+    
+    local notifCorner = Instance.new("UICorner", notif)
+    notifCorner.CornerRadius = UDim.new(0, 10)
+    
+    local notifStroke = Instance.new("UIStroke", notif)
+    notifStroke.Color = Color3.new(1, 1, 1)
+    notifStroke.Thickness = 2
+    notifStroke.Transparency = 0.5
+    
+    local icon = Instance.new("TextLabel", notif)
+    icon.Size = UDim2.new(0, 50, 1, 0)
+    icon.BackgroundTransparency = 1
+    icon.Text = "🔧"
+    icon.TextSize = 28
+    icon.Font = Enum.Font.GothamBold
+    
+    local title = Instance.new("TextLabel", notif)
+    title.Size = UDim2.new(1, -60, 0, 20)
+    title.Position = UDim2.new(0, 55, 0, 5)
+    title.BackgroundTransparency = 1
+    title.Text = "CRAFTED!"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.TextSize = 12
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local desc = Instance.new("TextLabel", notif)
+    desc.Size = UDim2.new(1, -60, 0, 20)
+    desc.Position = UDim2.new(0, 55, 0, 25)
+    desc.BackgroundTransparency = 1
+    desc.Text = "+" .. grenadesProduced .. " Grenades 💣"
+    desc.TextColor3 = Color3.fromRGB(255, 255, 200)
+    desc.TextSize = 14
+    desc.Font = Enum.Font.GothamBlack
+    desc.TextXAlignment = Enum.TextXAlignment.Left
+    
+    TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back), {
+        Position = UDim2.new(0.5, -125, 0, 20)
+    }):Play()
+    
+    task.delay(2.5, function()
+        TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+            Position = UDim2.new(0.5, -125, 0, -60)
+        }):Play()
+        task.delay(0.5, function()
+            notif:Destroy()
+        end)
+    end)
+end
+
+local function doCraft()
+    local recipe = getCraftingRecipe()
+    if not recipe then return false end
+    
+    if metalCount < recipe.metalRequired then
+        playErrorSound()
+        if craftButton then
+            local originalColor = craftButton.BackgroundColor3
+            TweenService:Create(craftButton, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(255, 50, 50)}):Play()
+            task.delay(0.1, function()
+                TweenService:Create(craftButton, TweenInfo.new(0.2), {BackgroundColor3 = originalColor}):Play()
+            end)
+        end
+        return false
+    end
+    
+    metalCount = metalCount - recipe.metalRequired
+    grenadeAmmo = grenadeAmmo + recipe.grenadesProduced
+    collectedGrenades = collectedGrenades + recipe.grenadesProduced
+    totalScore = totalScore + (recipe.grenadesProduced * 5)
+    
+    playCraftingSound()
+    showCraftingNotification(recipe.grenadesProduced)
+    
+    if craftButton then
+        TweenService:Create(craftButton, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(100, 255, 100)}):Play()
+        task.delay(0.2, function()
+            if canCraft() then
+                TweenService:Create(craftButton, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(100, 200, 100)}):Play()
+            else
+                TweenService:Create(craftButton, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(80, 80, 100)}):Play()
+            end
+        end)
+    end
+    
+    print(string.format("🔧 Crafted %d grenades! (Metal: %.1f remaining, Ammo: %d)", 
+        recipe.grenadesProduced, metalCount, grenadeAmmo))
+    
+    return true
+end
+
+local function collectMetal()
+    local recipe = getCraftingRecipe()
+    if not recipe then return end
+    
+    local metalGain = recipe.metalPerTick * metalMultiplier
+    metalCount = metalCount + metalGain
+    playMetalCollectSound()
+    
+    local floatingText = Instance.new("Part")
+    floatingText.Size = Vector3.new(0.1, 0.1, 0.1)
+    floatingText.Transparency = 1
+    floatingText.Anchored = true
+    floatingText.CanCollide = false
+    floatingText.Position = root.Position + Vector3.new(math.random(-2, 2), 2, math.random(-2, 2))
+    floatingText.Parent = workspace
+    
+    local textBillboard = Instance.new("BillboardGui")
+    textBillboard.Size = UDim2.new(0, 80, 0, 25)
+    textBillboard.AlwaysOnTop = true
+    textBillboard.Parent = floatingText
+    
+    local displayGain = metalGain == math.floor(metalGain) and tostring(math.floor(metalGain)) or string.format("%.1f", metalGain)
+    
+    local floatLabel = Instance.new("TextLabel")
+    floatLabel.Size = UDim2.new(1, 0, 1, 0)
+    floatLabel.BackgroundTransparency = 1
+    floatLabel.Text = "+⚙️" .. displayGain
+    floatLabel.TextColor3 = metalMultiplier > 1 and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(180, 180, 200)
+    floatLabel.TextStrokeTransparency = 0
+    floatLabel.TextScaled = true
+    floatLabel.Font = Enum.Font.GothamBold
+    floatLabel.Parent = textBillboard
+    
+    local startPos = floatingText.Position
+    local startTime = tick()
+    local floatConn
+    floatConn = RunService.Heartbeat:Connect(function()
+        local elapsed = tick() - startTime
+        if elapsed > 1 then
+            floatingText:Destroy()
+            floatConn:Disconnect()
+            return
+        end
+        floatingText.Position = startPos + Vector3.new(0, elapsed * 2, 0)
+        floatLabel.TextTransparency = elapsed
+        floatLabel.TextStrokeTransparency = elapsed
+    end)
+    
+    print(string.format("⚙️ +%.1f Metal (Total: %.1f/%d)", metalGain, metalCount, recipe.metalRequired))
+end
+
 -- Event System Functions
 local function showEventNotification(event, isEnding)
     local g = gui:FindFirstChild("SourceDBG")
     if not g then return end
     
-    -- Create notification
     local notif = Instance.new("Frame", g)
     notif.Size = UDim2.new(0, 300, 0, 60)
     notif.Position = UDim2.new(0.5, -150, 0, -70)
@@ -402,12 +679,10 @@ local function showEventNotification(event, isEnding)
     name.Font = Enum.Font.GothamBlack
     name.TextXAlignment = Enum.TextXAlignment.Left
     
-    -- Animate in
     TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back), {
         Position = UDim2.new(0.5, -150, 0, 20)
     }):Play()
     
-    -- Animate out after delay
     task.delay(3, function()
         TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
             Position = UDim2.new(0.5, -150, 0, -70)
@@ -416,6 +691,124 @@ local function showEventNotification(event, isEnding)
             notif:Destroy()
         end)
     end)
+end
+
+-- Grenade Rain - spawn falling gift grenades
+local function spawnFallingGrenade()
+    if not grenadeRainActive then return end
+    if not scriptEnabled then return end
+    
+    local angle = math.random() * math.pi * 2
+    local distance = math.random(10, 40)
+    local offsetX = math.cos(angle) * distance
+    local offsetZ = math.sin(angle) * distance
+    
+    local targetPos = root.Position + Vector3.new(offsetX, 0, offsetZ)
+    local startPos = targetPos + Vector3.new(0, 60, 0)
+    
+    local gift = Instance.new("Part")
+    gift.Name = "FallingGrenade"
+    gift.Size = Vector3.new(2, 2, 2)
+    gift.Shape = Enum.PartType.Ball
+    gift.Color = Color3.fromRGB(255, 100, 200)
+    gift.Material = Enum.Material.Neon
+    gift.Position = startPos
+    gift.Anchored = false
+    gift.CanCollide = false
+    gift.Parent = workspace
+    
+    local pointLight = Instance.new("PointLight")
+    pointLight.Color = Color3.fromRGB(255, 100, 200)
+    pointLight.Brightness = 3
+    pointLight.Range = 10
+    pointLight.Parent = gift
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Size = UDim2.new(0, 60, 0, 30)
+    billboard.StudsOffset = Vector3.new(0, 2, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = gift
+    
+    local giftLabel = Instance.new("TextLabel")
+    giftLabel.Size = UDim2.new(1, 0, 1, 0)
+    giftLabel.BackgroundTransparency = 1
+    giftLabel.Text = "🎁 FREE!"
+    giftLabel.TextColor3 = Color3.fromRGB(255, 255, 100)
+    giftLabel.TextStrokeTransparency = 0
+    giftLabel.TextScaled = true
+    giftLabel.Font = Enum.Font.GothamBold
+    giftLabel.Parent = billboard
+    
+    gift.AssemblyLinearVelocity = Vector3.new(0, -30, 0)
+    
+    local collected = false
+    
+    local touchConnection
+    touchConnection = gift.Touched:Connect(function(hit)
+        if collected then return end
+        
+        if hit and hit:IsDescendantOf(character) then
+            collected = true
+            grenadeAmmo = grenadeAmmo + 1
+            totalScore = totalScore + 15
+            collectedGrenades = collectedGrenades + 1
+            
+            playGiftSound()
+            
+            local floatingText = Instance.new("Part")
+            floatingText.Size = Vector3.new(0.1, 0.1, 0.1)
+            floatingText.Transparency = 1
+            floatingText.Anchored = true
+            floatingText.CanCollide = false
+            floatingText.Position = gift.Position
+            floatingText.Parent = workspace
+            
+            local textBillboard2 = Instance.new("BillboardGui")
+            textBillboard2.Size = UDim2.new(0, 80, 0, 30)
+            textBillboard2.AlwaysOnTop = true
+            textBillboard2.Parent = floatingText
+            
+            local floatLabel = Instance.new("TextLabel")
+            floatLabel.Size = UDim2.new(1, 0, 1, 0)
+            floatLabel.BackgroundTransparency = 1
+            floatLabel.Text = "🎁 +1💣"
+            floatLabel.TextColor3 = Color3.fromRGB(255, 100, 200)
+            floatLabel.TextStrokeTransparency = 0
+            floatLabel.TextScaled = true
+            floatLabel.Font = Enum.Font.GothamBlack
+            floatLabel.Parent = textBillboard2
+            
+            local startPos2 = floatingText.Position
+            local startTime2 = tick()
+            local floatConn
+            floatConn = RunService.Heartbeat:Connect(function()
+                local elapsed = tick() - startTime2
+                if elapsed > 1.5 then
+                    floatingText:Destroy()
+                    floatConn:Disconnect()
+                    return
+                end
+                floatingText.Position = startPos2 + Vector3.new(0, elapsed * 3, 0)
+                floatLabel.TextTransparency = elapsed / 1.5
+                floatLabel.TextStrokeTransparency = elapsed / 1.5
+            end)
+            
+            gift:Destroy()
+            touchConnection:Disconnect()
+            print("🎁 Caught free grenade!")
+            
+        elseif hit and hit.CanCollide and not hit:IsDescendantOf(character) then
+            gift.Anchored = true
+            task.delay(5, function()
+                if gift and gift.Parent and not collected then
+                    gift:Destroy()
+                end
+            end)
+            touchConnection:Disconnect()
+        end
+    end)
+    
+    Debris:AddItem(gift, 10)
 end
 
 local function startEvent(eventData)
@@ -427,19 +820,77 @@ local function startEvent(eventData)
     
     print(string.format("🎉 EVENT STARTED: %s %s (%.0fs)", eventData.icon, eventData.name, eventData.duration))
     
-    -- Apply event effects
     if eventData.name == "Moon Gravity" then
         gravityModifier = 10
         print("🌙 Gravity reduced! Now at " .. getEffectiveGravity())
         
     elseif eventData.name == "Lucky Day" then
-        spawnChanceBonus = 0.20 -- +20%
+        spawnChanceBonus = 0.20
         spawnIntervalOverride = 6.35
         print("🍀 Lucky Day! +20% spawn chance, 6.35s interval")
         
     elseif eventData.name == "Raining Bombs" then
         rainingBombsActive = true
         print("💥 Raining Bombs! Watch the sky!")
+        
+    elseif eventData.name == "Double Metal" then
+        metalMultiplier = 2
+        print("⚙️ Double Metal! 2x metal gain!")
+        
+    elseif eventData.name == "Speed Boost" then
+        speedMultiplier = 1.5
+        print("⚡ Speed Boost! 1.5x movement speed!")
+        
+    elseif eventData.name == "Grenade Rain" then
+        grenadeRainActive = true
+        print("🎁 Grenade Rain! Free grenades falling!")
+        
+    elseif eventData.name == "Metal Shower" then
+        local bonusMetal = 5
+        metalCount = metalCount + bonusMetal
+        print("🌟 Metal Shower! +" .. bonusMetal .. " metal!")
+        
+        local floatingText = Instance.new("Part")
+        floatingText.Size = Vector3.new(0.1, 0.1, 0.1)
+        floatingText.Transparency = 1
+        floatingText.Anchored = true
+        floatingText.CanCollide = false
+        floatingText.Position = root.Position + Vector3.new(0, 3, 0)
+        floatingText.Parent = workspace
+        
+        local textBillboard = Instance.new("BillboardGui")
+        textBillboard.Size = UDim2.new(0, 120, 0, 40)
+        textBillboard.AlwaysOnTop = true
+        textBillboard.Parent = floatingText
+        
+        local floatLabel = Instance.new("TextLabel")
+        floatLabel.Size = UDim2.new(1, 0, 1, 0)
+        floatLabel.BackgroundTransparency = 1
+        floatLabel.Text = "🌟 +5 METAL!"
+        floatLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+        floatLabel.TextStrokeTransparency = 0
+        floatLabel.TextScaled = true
+        floatLabel.Font = Enum.Font.GothamBlack
+        floatLabel.Parent = textBillboard
+        
+        local startPos = floatingText.Position
+        local startTime = tick()
+        local floatConn
+        floatConn = RunService.Heartbeat:Connect(function()
+            local elapsed = tick() - startTime
+            if elapsed > 2 then
+                floatingText:Destroy()
+                floatConn:Disconnect()
+                return
+            end
+            floatingText.Position = startPos + Vector3.new(0, elapsed * 2, 0)
+            floatLabel.TextTransparency = elapsed / 2
+            floatLabel.TextStrokeTransparency = elapsed / 2
+        end)
+        
+    elseif eventData.name == "Magnet" then
+        magnetActive = true
+        print("🧲 Magnet activated! Collectibles pulled towards you!")
     end
 end
 
@@ -449,7 +900,6 @@ local function endEvent()
     showEventNotification(currentEvent, true)
     print(string.format("⏹️ EVENT ENDED: %s %s", currentEvent.icon, currentEvent.name))
     
-    -- Remove event effects
     if currentEvent.name == "Moon Gravity" then
         gravityModifier = 0
         
@@ -459,6 +909,18 @@ local function endEvent()
         
     elseif currentEvent.name == "Raining Bombs" then
         rainingBombsActive = false
+        
+    elseif currentEvent.name == "Double Metal" then
+        metalMultiplier = 1
+        
+    elseif currentEvent.name == "Speed Boost" then
+        speedMultiplier = 1
+        
+    elseif currentEvent.name == "Grenade Rain" then
+        grenadeRainActive = false
+        
+    elseif currentEvent.name == "Magnet" then
+        magnetActive = false
     end
     
     currentEvent = nil
@@ -466,7 +928,7 @@ local function endEvent()
 end
 
 local function tryTriggerEvent()
-    if currentEvent then return end -- Already in an event
+    if currentEvent then return end
     
     local roll = math.random()
     local cumulative = 0
@@ -480,12 +942,28 @@ local function tryTriggerEvent()
     end
 end
 
+-- Magnet effect - pull collectibles
+local function applyMagnetEffect()
+    if not magnetActive then return end
+    if not collectionFolder or not collectionFolder.Parent then return end
+    
+    for _, collectible in pairs(collectionFolder:GetChildren()) do
+        if collectible:IsA("BasePart") then
+            local dist = (collectible.Position - root.Position).Magnitude
+            if dist < 30 and dist > 3 then
+                local dir = (root.Position - collectible.Position).Unit
+                local newPos = collectible.Position + dir * 0.5
+                collectible.Position = newPos
+            end
+        end
+    end
+end
+
 -- Raining Bombs Functions
 local function spawnFallingBomb()
     if not rainingBombsActive then return end
     if not scriptEnabled then return end
     
-    -- Random position around player
     local angle = math.random() * math.pi * 2
     local distance = math.random(5, 30)
     local offsetX = math.cos(angle) * distance
@@ -494,13 +972,10 @@ local function spawnFallingBomb()
     local targetPos = root.Position + Vector3.new(offsetX, 0, offsetZ)
     local startPos = targetPos + Vector3.new(0, 80, 0)
     
-    -- Check if this bomb might hit player (chance to dodge)
     local distToPlayer = (Vector3.new(targetPos.X, 0, targetPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
-    local willHitPlayer = distToPlayer < 8
     local dodgeChance = math.random()
-    local playerDodged = dodgeChance > 0.6 -- 40% chance to "dodge" (bomb misses)
+    local playerDodged = dodgeChance > 0.6
     
-    -- Create bomb
     local bomb = Instance.new("Part")
     bomb.Name = "FallingBomb"
     bomb.Size = Vector3.new(2, 3, 2)
@@ -513,7 +988,6 @@ local function spawnFallingBomb()
     bomb.CanCollide = false
     bomb.Parent = workspace
     
-    -- Add fins
     local fin = Instance.new("Part")
     fin.Size = Vector3.new(1, 0.2, 2)
     fin.Color = Color3.fromRGB(100, 0, 0)
@@ -528,7 +1002,6 @@ local function spawnFallingBomb()
     finWeld.Parent = bomb
     fin.Position = bomb.Position + Vector3.new(0, 1.5, 0)
     
-    -- Warning indicator on ground
     local warning = Instance.new("Part")
     warning.Name = "BombWarning"
     warning.Size = Vector3.new(bombBlastRadius * 2, 0.2, bombBlastRadius * 2)
@@ -544,7 +1017,6 @@ local function spawnFallingBomb()
     
     playBombWarningSound()
     
-    -- Blink warning
     local blinkConnection
     local blinkState = false
     blinkConnection = RunService.Heartbeat:Connect(function()
@@ -556,12 +1028,10 @@ local function spawnFallingBomb()
         warning.Transparency = blinkState and 0.5 or 0.8
     end)
     
-    -- Apply velocity
     bomb.AssemblyLinearVelocity = Vector3.new(0, -60, 0)
     
     local hasExploded = false
     
-    -- Touch detection
     local touchConnection
     touchConnection = bomb.Touched:Connect(function(hit)
         if hasExploded then return end
@@ -570,11 +1040,9 @@ local function spawnFallingBomb()
             
             local explosionPos = bomb.Position
             
-            -- Check if player is in range
             local dist = (root.Position - explosionPos).Magnitude
             local playerInRange = dist <= bombBlastRadius
             
-            -- Explode
             local explodeSound = Instance.new("Sound", workspace)
             explodeSound.SoundId = "rbxassetid://90586353104830"
             explodeSound.Volume = 1.2
@@ -587,18 +1055,15 @@ local function spawnFallingBomb()
             explosion.BlastRadius = bombBlastRadius
             explosion.Parent = workspace
             
-            -- If player is in range, push them
             if playerInRange then
                 local dir = (root.Position - explosionPos).Unit
                 local forceMagnitude = 60
                 velocity = velocity + dir * forceMagnitude
                 
-                -- In scavenger mode, if they "survived" (dodged), give a grenade
                 if isCollectionMode() and playerDodged then
                     grenadeAmmo = grenadeAmmo + 1
                     totalScore = totalScore + 5
                     
-                    -- Show reward notification
                     local floatingText = Instance.new("Part")
                     floatingText.Size = Vector3.new(0.1, 0.1, 0.1)
                     floatingText.Transparency = 1
@@ -650,7 +1115,6 @@ local function spawnFallingBomb()
         end
     end)
     
-    -- Timeout
     Debris:AddItem(bomb, 5)
     Debris:AddItem(warning, 5)
 end
@@ -1019,8 +1483,8 @@ local function createGui()
 
     -- Main Container
     local mainFrame = Instance.new("Frame", g)
-    mainFrame.Size = UDim2.new(0, 200, 0, 340)
-    mainFrame.Position = UDim2.new(0, 15, 1, -355)
+    mainFrame.Size = UDim2.new(0, 200, 0, 410)
+    mainFrame.Position = UDim2.new(0, 15, 1, -425)
     mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
     mainFrame.BorderSizePixel = 0
     mainFrame.Name = "MainFrame"
@@ -1205,10 +1669,94 @@ local function createGui()
     ammoHint.TextXAlignment = Enum.TextXAlignment.Right
     ammoHint.Name = "AmmoHint"
 
+    -- Crafting Frame
+    craftingFrame = Instance.new("Frame", mainFrame)
+    craftingFrame.Size = UDim2.new(1, -20, 0, 60)
+    craftingFrame.Position = UDim2.new(0, 10, 0, 208)
+    craftingFrame.BackgroundColor3 = Color3.fromRGB(45, 40, 55)
+    craftingFrame.BorderSizePixel = 0
+    craftingFrame.Name = "CraftingFrame"
+    craftingFrame.Visible = hasCraftingEnabled()
+    
+    local craftingFrameCorner = Instance.new("UICorner", craftingFrame)
+    craftingFrameCorner.CornerRadius = UDim.new(0, 6)
+    
+    local craftingTitle = Instance.new("TextLabel", craftingFrame)
+    craftingTitle.Size = UDim2.new(1, 0, 0, 14)
+    craftingTitle.Position = UDim2.new(0, 5, 0, 2)
+    craftingTitle.BackgroundTransparency = 1
+    craftingTitle.Text = "🔧 CRAFTING [C]"
+    craftingTitle.TextColor3 = Color3.fromRGB(180, 180, 220)
+    craftingTitle.TextSize = 10
+    craftingTitle.Font = Enum.Font.GothamBold
+    craftingTitle.TextXAlignment = Enum.TextXAlignment.Left
+    
+    metalLabel = Instance.new("TextLabel", craftingFrame)
+    metalLabel.Size = UDim2.new(0.6, -5, 0, 14)
+    metalLabel.Position = UDim2.new(0, 5, 0, 16)
+    metalLabel.BackgroundTransparency = 1
+    metalLabel.Text = "⚙️ Metal: 0/3"
+    metalLabel.TextColor3 = Color3.fromRGB(180, 180, 200)
+    metalLabel.TextSize = 11
+    metalLabel.Font = Enum.Font.GothamBold
+    metalLabel.TextXAlignment = Enum.TextXAlignment.Left
+    metalLabel.Name = "MetalLabel"
+    
+    -- Craft Button
+    craftButton = Instance.new("TextButton", craftingFrame)
+    craftButton.Size = UDim2.new(0.35, -5, 0, 18)
+    craftButton.Position = UDim2.new(0.65, 0, 0, 14)
+    craftButton.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+    craftButton.BorderSizePixel = 0
+    craftButton.Text = "🔨 CRAFT"
+    craftButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+    craftButton.TextSize = 10
+    craftButton.Font = Enum.Font.GothamBold
+    craftButton.Name = "CraftButton"
+    
+    local craftButtonCorner = Instance.new("UICorner", craftButton)
+    craftButtonCorner.CornerRadius = UDim.new(0, 4)
+    
+    craftButton.MouseButton1Click:Connect(function()
+        doCraft()
+    end)
+    
+    -- Crafting Progress Bar
+    local craftingBarBg = Instance.new("Frame", craftingFrame)
+    craftingBarBg.Size = UDim2.new(1, -10, 0, 8)
+    craftingBarBg.Position = UDim2.new(0, 5, 0, 35)
+    craftingBarBg.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    craftingBarBg.BorderSizePixel = 0
+    craftingBarBg.Name = "CraftingBarBg"
+    
+    local craftingBarBgCorner = Instance.new("UICorner", craftingBarBg)
+    craftingBarBgCorner.CornerRadius = UDim.new(0, 4)
+    
+    craftingBar = Instance.new("Frame", craftingBarBg)
+    craftingBar.Size = UDim2.new(0, 0, 1, 0)
+    craftingBar.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+    craftingBar.BorderSizePixel = 0
+    craftingBar.Name = "CraftingFill"
+    
+    local craftingBarFillCorner = Instance.new("UICorner", craftingBar)
+    craftingBarFillCorner.CornerRadius = UDim.new(0, 4)
+    
+    -- Crafting result preview
+    local craftResultLabel = Instance.new("TextLabel", craftingFrame)
+    craftResultLabel.Size = UDim2.new(1, -10, 0, 12)
+    craftResultLabel.Position = UDim2.new(0, 5, 0, 45)
+    craftResultLabel.BackgroundTransparency = 1
+    craftResultLabel.Text = "→ Craft for 3💣"
+    craftResultLabel.TextColor3 = Color3.fromRGB(150, 150, 180)
+    craftResultLabel.TextSize = 9
+    craftResultLabel.Font = Enum.Font.Gotham
+    craftResultLabel.TextXAlignment = Enum.TextXAlignment.Left
+    craftResultLabel.Name = "CraftResultLabel"
+
     -- Collection Stats Frame
     collectionFrame = Instance.new("Frame", mainFrame)
     collectionFrame.Size = UDim2.new(1, -20, 0, 55)
-    collectionFrame.Position = UDim2.new(0, 10, 0, 208)
+    collectionFrame.Position = UDim2.new(0, 10, 0, 272)
     collectionFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
     collectionFrame.BorderSizePixel = 0
     collectionFrame.Name = "CollectionFrame"
@@ -1262,7 +1810,7 @@ local function createGui()
     -- Grenade Cooldown Display
     local cooldownFrame = Instance.new("Frame", mainFrame)
     cooldownFrame.Size = UDim2.new(1, -20, 0, 28)
-    cooldownFrame.Position = UDim2.new(0, 10, 0, 208)
+    cooldownFrame.Position = UDim2.new(0, 10, 0, 272)
     cooldownFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
     cooldownFrame.BorderSizePixel = 0
     cooldownFrame.Name = "CooldownFrame"
@@ -1281,24 +1829,24 @@ local function createGui()
     cooldownLabel.Font = Enum.Font.GothamBold
     cooldownLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    local cooldownBarBg = Instance.new("Frame", cooldownFrame)
-    cooldownBarBg.Size = UDim2.new(1, -90, 0, 12)
-    cooldownBarBg.Position = UDim2.new(0, 50, 0.5, -6)
-    cooldownBarBg.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-    cooldownBarBg.BorderSizePixel = 0
+    local cooldownBarBg2 = Instance.new("Frame", cooldownFrame)
+    cooldownBarBg2.Size = UDim2.new(1, -90, 0, 12)
+    cooldownBarBg2.Position = UDim2.new(0, 50, 0.5, -6)
+    cooldownBarBg2.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    cooldownBarBg2.BorderSizePixel = 0
     
-    local cooldownBarBgCorner = Instance.new("UICorner", cooldownBarBg)
-    cooldownBarBgCorner.CornerRadius = UDim.new(0, 4)
+    local cooldownBarBgCorner2 = Instance.new("UICorner", cooldownBarBg2)
+    cooldownBarBgCorner2.CornerRadius = UDim.new(0, 4)
     
-    cooldownBar = Instance.new("Frame", cooldownBarBg)
+    cooldownBar = Instance.new("Frame", cooldownBarBg2)
     cooldownBar.Size = UDim2.new(1, 0, 1, 0)
     cooldownBar.Position = UDim2.new(0, 0, 0, 0)
     cooldownBar.BackgroundColor3 = Color3.fromRGB(80, 255, 130)
     cooldownBar.BorderSizePixel = 0
     cooldownBar.Name = "CooldownFill"
     
-    local cooldownBarFillCorner = Instance.new("UICorner", cooldownBar)
-    cooldownBarFillCorner.CornerRadius = UDim.new(0, 4)
+    local cooldownBarFillCorner2 = Instance.new("UICorner", cooldownBar)
+    cooldownBarFillCorner2.CornerRadius = UDim.new(0, 4)
     
     cooldownText = Instance.new("TextLabel", cooldownFrame)
     cooldownText.Size = UDim2.new(0, 35, 1, 0)
@@ -1353,6 +1901,8 @@ local function createGui()
             if isCollectionMode() then
                 createCollectionFolder()
             end
+            
+            lastMetalTime = tick()
             
             if isMobile then
                 local jumpBtn = g:FindFirstChild("JumpButton")
@@ -1411,16 +1961,20 @@ local function createGui()
         
         collectionFrame.Visible = isCollectionMode()
         cooldownFrame.Visible = mode.grenadeCooldown > 0 and not isCollectionMode()
+        craftingFrame.Visible = hasCraftingEnabled()
         
         if isCollectionMode() and scriptEnabled then
             createCollectionFolder()
             lastSpawnTime = tick()
         end
         
+        -- Reset stats when changing modes
         collectedGrenades = 0
         totalScore = 0
         grenadeAmmo = 0
+        metalCount = 0
         lastEventCheck = tick()
+        lastMetalTime = tick()
     end)
 
     -- Mobile Controls
@@ -1505,6 +2059,30 @@ local function createGui()
             jumpButton.BackgroundColor3 = Color3.fromRGB(60, 140, 255)
         end)
         
+        -- Mobile Craft Button
+        local mobileCraftButton = Instance.new("TextButton", g)
+        mobileCraftButton.Size = UDim2.new(0, 60, 0, 60)
+        mobileCraftButton.Position = UDim2.new(1, -170, 0.5, -30)
+        mobileCraftButton.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+        mobileCraftButton.BorderSizePixel = 0
+        mobileCraftButton.Text = "🔨"
+        mobileCraftButton.TextSize = 24
+        mobileCraftButton.Font = Enum.Font.GothamBold
+        mobileCraftButton.Name = "MobileCraftButton"
+        mobileCraftButton.Visible = hasCraftingEnabled()
+        
+        local mobileCraftCorner = Instance.new("UICorner", mobileCraftButton)
+        mobileCraftCorner.CornerRadius = UDim.new(0.5, 0)
+        
+        local mobileCraftStroke = Instance.new("UIStroke", mobileCraftButton)
+        mobileCraftStroke.Color = Color3.fromRGB(255, 255, 255)
+        mobileCraftStroke.Transparency = 0.6
+        mobileCraftStroke.Thickness = 2
+        
+        mobileCraftButton.MouseButton1Click:Connect(function()
+            doCraft()
+        end)
+        
         task.spawn(function()
             while g and g.Parent do
                 task.wait(0.05)
@@ -1540,6 +2118,16 @@ local function createGui()
                         overlay.Size = UDim2.new(1, 0, 0, 0)
                     end
                 end
+                
+                -- Update mobile craft button
+                mobileCraftButton.Visible = hasCraftingEnabled()
+                if hasCraftingEnabled() then
+                    if canCraft() then
+                        mobileCraftButton.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
+                    else
+                        mobileCraftButton.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+                    end
+                end
             end
         end)
     end
@@ -1563,6 +2151,52 @@ local function createGui()
                         ammoLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
                     else
                         ammoLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                    end
+                end
+            end
+            
+            -- Update crafting display
+            if craftingFrame and craftingFrame.Visible then
+                local recipe = getCraftingRecipe()
+                if recipe and metalLabel and craftingBar then
+                    local displayMetal = string.format("%.1f", metalCount)
+                    if metalCount == math.floor(metalCount) then
+                        displayMetal = tostring(math.floor(metalCount))
+                    end
+                    
+                    local multiplierText = metalMultiplier > 1 and " (2x)" or ""
+                    metalLabel.Text = string.format("⚙️ %s/%d%s", displayMetal, recipe.metalRequired, multiplierText)
+                    
+                    if metalMultiplier > 1 then
+                        metalLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+                    else
+                        metalLabel.TextColor3 = Color3.fromRGB(180, 180, 200)
+                    end
+                    
+                    local progress = math.min(metalCount / recipe.metalRequired, 1)
+                    craftingBar.Size = UDim2.new(progress, 0, 1, 0)
+                    
+                    -- Update craft button
+                    if craftButton then
+                        if canCraft() then
+                            craftButton.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
+                            craftButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+                        else
+                            craftButton.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+                            craftButton.TextColor3 = Color3.fromRGB(150, 150, 150)
+                        end
+                    end
+                    
+                    -- Update result label
+                    local resultLabel = craftingFrame:FindFirstChild("CraftResultLabel")
+                    if resultLabel then
+                        resultLabel.Text = string.format("→ Craft for %d💣", recipe.grenadesProduced)
+                    end
+                    
+                    if progress >= 1 then
+                        craftingBar.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+                    else
+                        craftingBar.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
                     end
                 end
             end
@@ -1636,18 +2270,43 @@ local function createGui()
         end
     end)
     
+    -- Metal collection loop (crafting)
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(0.1)
+            
+            if scriptEnabled and hasCraftingEnabled() then
+                local elapsed = tick() - lastMetalTime
+                
+                if elapsed >= METAL_INTERVAL then
+                    lastMetalTime = tick()
+                    collectMetal()
+                end
+            end
+        end
+    end)
+    
+    -- Magnet effect loop
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(0.1)
+            
+            if scriptEnabled and magnetActive then
+                applyMagnetEffect()
+            end
+        end
+    end)
+    
     -- Event system loop
     task.spawn(function()
         while g and g.Parent do
             task.wait(1)
             
             if scriptEnabled then
-                -- Check if current event should end
                 if currentEvent and tick() >= eventEndTime then
                     endEvent()
                 end
                 
-                -- Try to trigger new event
                 local elapsed = tick() - lastEventCheck
                 if elapsed >= eventCheckInterval and not currentEvent then
                     lastEventCheck = tick()
@@ -1660,10 +2319,21 @@ local function createGui()
     -- Raining bombs loop
     task.spawn(function()
         while g and g.Parent do
-            task.wait(0.8 + math.random() * 0.7) -- Random interval 0.8-1.5s
+            task.wait(0.8 + math.random() * 0.7)
             
             if scriptEnabled and rainingBombsActive then
                 spawnFallingBomb()
+            end
+        end
+    end)
+    
+    -- Grenade rain loop
+    task.spawn(function()
+        while g and g.Parent do
+            task.wait(1.5 + math.random() * 1.0)
+            
+            if scriptEnabled and grenadeRainActive then
+                spawnFallingGrenade()
             end
         end
     end)
@@ -1677,6 +2347,7 @@ if isCollectionMode() then
     lastSpawnTime = tick()
 end
 lastEventCheck = tick()
+lastMetalTime = tick()
 
 task.spawn(function()
     while true do
@@ -1793,14 +2464,16 @@ local function process(dt)
     end
 
     local effectiveGravity = getEffectiveGravity()
+    local effectiveRunSpeed = getEffectiveRunSpeed()
 
     if isGrounded then
         applyFriction(dt)
-        accel(moveDir, cfg.runSpeed, cfg.groundAccel, dt)
+        accel(moveDir, effectiveRunSpeed, cfg.groundAccel, dt)
 
         if moveDir.Magnitude > 0.1 then
             footstepTimer = footstepTimer + dt
-            if footstepTimer >= footstepInterval then
+            local effectiveFootstepInterval = footstepInterval / speedMultiplier
+            if footstepTimer >= effectiveFootstepInterval then
                 playFootstep()
                 footstepTimer = 0
             end
@@ -1827,6 +2500,8 @@ UserInputService.InputBegan:Connect(function(i)
         spaceHeld = true
     elseif i.KeyCode == Enum.KeyCode.X and scriptEnabled and not isMobile then
         throwGrenade()
+    elseif i.KeyCode == Enum.KeyCode.C and scriptEnabled and not isMobile then
+        doCraft()
     end
 end)
 
@@ -1857,13 +2532,20 @@ end)
 print("Source Movement successfully Loaded")
 print("Game Modes Available:")
 print("  🎮 Default - Unlimited grenades")
-print("  🔍 Scavenger - Collect grenades to throw! 10s spawn, 70% chance")
-print("  💀 Hard - Unlimited grenades with 3s cooldown, reduced air control")
-print("  🔥 Hard Scavenger - Collect to throw! 15s spawn, 35-40% chance, 1s CD")
+print("  🔍 Scavenger - Collect grenades! +1⚙️/3s, press C to craft 3💣")
+print("  💀 Hard - Unlimited grenades with 3s cooldown")
+print("  🔥 Hard Scavenger - Collect! +0.5⚙️/3s, press C to craft 1💣")
 print("")
-print("Events:")
-print("  💥 Raining Bombs - Bombs fall! Survive to earn grenades (Scavenger only)")
-print("  🌙 Moon Gravity - Gravity reduced by 10")
-print("  🍀 Lucky Day - +20% spawn chance, 6.35s interval")
+print("Crafting: Press [C] or tap 🔨 button to craft grenades!")
 print("")
-print("Press [X] or tap grenade button to throw!")
+print("Events (8 total):")
+print("  💥 Raining Bombs - Bombs fall! Survive for grenades")
+print("  🌙 Moon Gravity - Gravity -10")
+print("  🍀 Lucky Day - +20% spawn, 6.35s interval")
+print("  ⚙️ Double Metal - 2x metal gain")
+print("  ⚡ Speed Boost - 1.5x movement")
+print("  🎁 Grenade Rain - Free grenades fall!")
+print("  🌟 Metal Shower - Instant +5 metal")
+print("  🧲 Magnet - Pull collectibles")
+print("")
+print("Press [X] to throw, [C] to craft!")
